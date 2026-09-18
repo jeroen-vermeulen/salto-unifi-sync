@@ -67,7 +67,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.2'
+$ScriptVersion = '1.3.3'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1485,11 +1485,16 @@ function Restart-AfterScriptUpdate {
 
     Write-Host "[UPDATE] Restarting with v$RemoteVersion..." -ForegroundColor Green
     $scriptDir = Split-Path -Parent -LiteralPath $ScriptPath
-    $invoke = @(
-        "Set-Location -LiteralPath '$scriptDir'",
-        "& '$ScriptPath' -Mode '$Mode' -Filter '$Filter' -ConfigPath '$ConfigPath' -SkipUpdate"
-    ) -join '; '
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $invoke
+    $argList = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $ScriptPath,
+        '-Mode', $Mode,
+        '-Filter', $Filter,
+        '-ConfigPath', $ConfigPath,
+        '-SkipUpdate'
+    )
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WorkingDirectory $scriptDir | Out-Null
     exit 0
 }
 
