@@ -30,6 +30,12 @@
 .PARAMETER ConfigPath
     Path to JSON config. Default: unifi-sync-config.json next to this script.
 
+.PARAMETER SkipUpdate
+    Skip the GitHub auto-update check (used internally after a successful update restart).
+
+.PARAMETER ForceUpdateCheck
+    Check GitHub for updates even if UpdateCheckIntervalHours has not elapsed.
+
 .EXAMPLE
     .\Sync-Salto-Unifi.ps1 -Mode ShowDiff -Filter ALL
 
@@ -46,12 +52,16 @@ param(
 
     [string]$Filter = 'ALL',
 
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'unifi-sync-config.json')
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'unifi-sync-config.json'),
+
+    [switch]$SkipUpdate,
+
+    [switch]$ForceUpdateCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.2.7'
+$ScriptVersion = '1.3.0'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -183,6 +193,18 @@ function Read-Config([string]$Path) {
     Set-ConfigDefault $cfg 'LogDir' (Join-Path $PSScriptRoot 'logs\salto-unifi-sync')
     Set-ConfigDefault $cfg 'DeactivateWhenIneligible' $true
     Set-ConfigDefault $cfg 'DeleteOrphanNfcTokens' $true
+    Set-ConfigDefault $cfg 'AutoUpdate' $false
+    Set-ConfigDefault $cfg 'UpdateChannel' 'main'
+    Set-ConfigDefault $cfg 'UpdateRepoOwner' 'jeroen-vermeulen'
+    Set-ConfigDefault $cfg 'UpdateRepoName' 'salto-unifi-sync'
+    Set-ConfigDefault $cfg 'UpdateCheckIntervalHours' 24
+    $ghTokenFile = Get-ObjProp $cfg 'UpdateGitHubTokenFile'
+    if ($ghTokenFile -and (Test-Path -LiteralPath $ghTokenFile)) {
+        $ghToken = (Get-Content -LiteralPath $ghTokenFile -Raw).Trim()
+        if ($ghToken) {
+            $cfg | Add-Member -NotePropertyName UpdateGitHubToken -NotePropertyValue $ghToken -Force
+        }
+    }
     return $cfg
 }
 
@@ -1297,6 +1319,236 @@ function Invoke-SyncAction {
 }
 
 # ---------------------------------------------------------------------------
+# Self-update (GitHub)
+# ---------------------------------------------------------------------------
+
+function Compare-ScriptVersion {
+    param(
+        [string]$Local,
+        [string]$Remote
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Remote)) { return 1 }
+    if ([string]::IsNullOrWhiteSpace($Local)) { return -1 }
+
+    try {
+        $localVer = [version]($Local -replace '-.*$', '')
+        $remoteVer = [version]($Remote -replace '-.*$', '')
+        return $localVer.CompareTo($remoteVer)
+    } catch {
+        return [string]::Compare($Local, $Remote, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
+function Get-UpdateCheckCachePath($Cfg) {
+    $logDir = Get-ObjProp $Cfg 'LogDir'
+    if (-not $logDir) { $logDir = Get-DefaultLogDir }
+    return (Join-Path $logDir 'last-update-check.txt')
+}
+
+function Test-UpdateCheckDue {
+    param(
+        $Cfg,
+        [switch]$Force
+    )
+
+    if ($Force) { return $true }
+
+    $intervalHours = Get-ObjProp $Cfg 'UpdateCheckIntervalHours'
+    if ($null -eq $intervalHours) { $intervalHours = 24 }
+    if ($intervalHours -le 0) { return $true }
+
+    $cachePath = Get-UpdateCheckCachePath -Cfg $Cfg
+    if (-not (Test-Path -LiteralPath $cachePath)) { return $true }
+
+    try {
+        $lastCheck = [datetime]::Parse((Get-Content -LiteralPath $cachePath -Raw).Trim())
+        return ((Get-Date) - $lastCheck).TotalHours -ge [double]$intervalHours
+    } catch {
+        return $true
+    }
+}
+
+function Set-UpdateCheckTimestamp {
+    param($Cfg)
+
+    $logDir = Get-ObjProp $Cfg 'LogDir'
+    if (-not $logDir) { $logDir = Get-DefaultLogDir }
+    if (-not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    $cachePath = Get-UpdateCheckCachePath -Cfg $Cfg
+    Set-Content -LiteralPath $cachePath -Value (Get-Date).ToString('o') -Encoding UTF8
+}
+
+function Get-FileSha256Hex {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+    return $hash.Hash.ToLowerInvariant()
+}
+
+function Invoke-GitHubRawDownload {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutPath,
+        [string]$GitHubToken
+    )
+
+    $curlArgs = @('-skL', '-m', '120', '-o', $OutPath, $Url)
+    if ($GitHubToken) {
+        $curlArgs = @(
+            '-skL', '-m', '120',
+            '-H', "Authorization: Bearer $GitHubToken",
+            '-o', $OutPath,
+            $Url
+        )
+    }
+
+    $raw = & curl.exe @curlArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl failed (exit $LASTEXITCODE): $(($raw | Out-String).Trim())"
+    }
+    if (-not (Test-Path -LiteralPath $OutPath)) {
+        throw "Download missing: $Url"
+    }
+    if ((Get-Item -LiteralPath $OutPath).Length -eq 0) {
+        throw "Download empty: $Url"
+    }
+}
+
+function Get-RemoteVersionManifest {
+    param(
+        $Cfg,
+        [string]$Channel
+    )
+
+    $owner = [string](Get-ObjProp $Cfg 'UpdateRepoOwner')
+    $repo = [string](Get-ObjProp $Cfg 'UpdateRepoName')
+    if (-not $owner -or -not $repo) {
+        throw 'UpdateRepoOwner and UpdateRepoName must be set when AutoUpdate is enabled.'
+    }
+
+    $versionUrl = "https://raw.githubusercontent.com/$owner/$repo/$Channel/version.json"
+    $tempFile = Join-Path $env:TEMP ("salto-unifi-version-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+    $ghToken = Get-ObjProp $Cfg 'UpdateGitHubToken'
+
+    try {
+        Invoke-GitHubRawDownload -Url $versionUrl -OutPath $tempFile -GitHubToken $ghToken
+        $raw = Get-Content -LiteralPath $tempFile -Raw
+        return ($raw | ConvertFrom-Json)
+    } finally {
+        Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-RemoteScriptSha256($Manifest) {
+    $fileEntry = Get-ObjProp $Manifest 'files'
+    if ($fileEntry) {
+        $scriptEntry = Get-ObjProp $fileEntry 'Sync-Salto-Unifi.ps1'
+        if ($scriptEntry) {
+            $hash = Get-ObjProp $scriptEntry 'sha256'
+            if ($hash) { return [string]$hash.ToLowerInvariant() }
+        }
+    }
+    $legacy = Get-ObjProp $Manifest 'sha256'
+    if ($legacy) { return [string]$legacy.ToLowerInvariant() }
+    return $null
+}
+
+function Restart-AfterScriptUpdate {
+    param(
+        [string]$ScriptPath,
+        [string]$RemoteVersion,
+        [string]$Mode,
+        [string]$Filter,
+        [string]$ConfigPath
+    )
+
+    Write-Host "[UPDATE] Restarting with v$RemoteVersion..." -ForegroundColor Green
+    $argList = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $ScriptPath,
+        '-Mode', $Mode,
+        '-Filter', $Filter,
+        '-ConfigPath', $ConfigPath,
+        '-SkipUpdate'
+    )
+    & powershell.exe @argList
+    exit 0
+}
+
+function Invoke-ScriptSelfUpdate {
+    param(
+        $Cfg,
+        [switch]$ForceUpdateCheck,
+        [string]$Mode,
+        [string]$Filter,
+        [string]$ConfigPath
+    )
+
+    if (-not (Get-ConfigBool $Cfg 'AutoUpdate' $false)) { return $false }
+    if (-not (Test-UpdateCheckDue -Cfg $Cfg -Force:$ForceUpdateCheck)) {
+        Write-Host '[UPDATE] Skipped (checked recently; use -ForceUpdateCheck to override).' -ForegroundColor DarkGray
+        return $false
+    }
+
+    $channel = [string](Get-ObjProp $Cfg 'UpdateChannel')
+    if (-not $channel) { $channel = 'main' }
+
+    Write-Host "[UPDATE] Checking GitHub channel '$channel' for newer script..." -ForegroundColor Cyan
+
+    try {
+        $manifest = Get-RemoteVersionManifest -Cfg $Cfg -Channel $channel
+        $remoteVersion = [string](Get-ObjProp $manifest 'version')
+        if (-not $remoteVersion) {
+            throw 'Remote version.json has no version field.'
+        }
+
+        if ((Compare-ScriptVersion -Local $ScriptVersion -Remote $remoteVersion) -ge 0) {
+            Write-Host "[UPDATE] Already on v$ScriptVersion (remote v$remoteVersion)." -ForegroundColor DarkGray
+            Set-UpdateCheckTimestamp -Cfg $Cfg
+            return $false
+        }
+
+        $expectedHash = Get-RemoteScriptSha256 -Manifest $manifest
+        if (-not $expectedHash) {
+            throw 'Remote version.json has no SHA256 for Sync-Salto-Unifi.ps1.'
+        }
+
+        $owner = [string](Get-ObjProp $Cfg 'UpdateRepoOwner')
+        $repo = [string](Get-ObjProp $Cfg 'UpdateRepoName')
+        $scriptUrl = "https://raw.githubusercontent.com/$owner/$repo/$channel/Sync-Salto-Unifi.ps1"
+        $scriptPath = Join-Path $PSScriptRoot 'Sync-Salto-Unifi.ps1'
+        $newPath = "$scriptPath.new"
+        $bakPath = "$scriptPath.bak"
+        $ghToken = Get-ObjProp $Cfg 'UpdateGitHubToken'
+
+        Write-Host "[UPDATE] Downloading v$remoteVersion..." -ForegroundColor Cyan
+        Invoke-GitHubRawDownload -Url $scriptUrl -OutPath $newPath -GitHubToken $ghToken
+
+        $actualHash = Get-FileSha256Hex -Path $newPath
+        if ($actualHash -ne $expectedHash) {
+            Remove-Item -LiteralPath $newPath -Force -ErrorAction SilentlyContinue
+            throw "SHA256 mismatch for downloaded script (expected $expectedHash, got $actualHash)."
+        }
+
+        Copy-Item -LiteralPath $scriptPath -Destination $bakPath -Force
+        Move-Item -LiteralPath $newPath -Destination $scriptPath -Force
+        Write-Host "[UPDATE] Installed v$remoteVersion (backup: $(Split-Path -Leaf $bakPath))." -ForegroundColor Green
+        Set-UpdateCheckTimestamp -Cfg $Cfg
+        Restart-AfterScriptUpdate -ScriptPath $scriptPath -RemoteVersion $remoteVersion `
+            -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath
+        return $true
+    } catch {
+        Write-Host "[UPDATE FAIL] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host '[UPDATE] Continuing with current script version.' -ForegroundColor DarkYellow
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1308,6 +1560,12 @@ $script:RunBoundaryStarted = $false
 
 try {
     $cfg = Read-Config -Path $ConfigPath
+
+    if (-not $SkipUpdate) {
+        Invoke-ScriptSelfUpdate -Cfg $cfg -ForceUpdateCheck:$ForceUpdateCheck `
+            -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath | Out-Null
+    }
+
     $logPath = Start-RunLogging -Cfg $cfg -RunId $runId
     Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -LogPath $logPath
     $script:RunBoundaryStarted = $true
