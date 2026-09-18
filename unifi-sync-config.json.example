@@ -1,0 +1,15 @@
+{
+  "UnifiHost": "https://unifi-access.local:12445",
+  "ApiTokenFile": "C:\\path\\to\\unifi-api.token",
+  "SqlServer": "localhost\\SQLEXPRESS",
+  "Database": "SALTO_SPACE",
+  "UserGroupName": "YourUserGroup",
+  "SaltoUserType": "STAFF",
+  "OnlyActive": true,
+  "RequireTag": true,
+  "DeactivateWhenIneligible": true,
+  "DeleteOrphanNfcTokens": true,
+  "PageSize": 200,
+  "LogEnabled": true,
+  "LogDir": "C:\\path\\to\\Sync-Salto-Unifi\\logs"
+}

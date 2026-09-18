@@ -1,0 +1,16 @@
+# Local configuration and secrets (never commit)
+unifi-sync-config.json
+*.token
+.env
+.env.*
+
+# Runtime output
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
