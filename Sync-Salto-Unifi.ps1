@@ -67,7 +67,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.4'
+$ScriptVersion = '1.3.5'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1492,7 +1492,7 @@ function Exit-AfterScriptUpdate {
     Write-Host ''
     Write-Host '[UPDATE] New version installed successfully.' -ForegroundColor Green
     Write-Host "[UPDATE] Installed : v$RemoteVersion (file on disk)" -ForegroundColor Green
-    Write-Host "[UPDATE] This run : v$LocalVersion (still in memory — sync not started)" -ForegroundColor Yellow
+    Write-Host "[UPDATE] This run : v$LocalVersion (still in memory - sync not started)" -ForegroundColor Yellow
     Write-Host "[UPDATE] Backup   : $backupName" -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '[UPDATE] Re-run the script to sync with the new version:' -ForegroundColor Cyan
