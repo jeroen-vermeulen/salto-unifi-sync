@@ -52,7 +52,7 @@ param(
 
     [string]$Filter = 'ALL',
 
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'unifi-sync-config.json'),
+    [string]$ConfigPath = '',
 
     [switch]$SkipUpdate,
 
@@ -61,7 +61,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.3.0'
+if (-not $PSScriptRoot) {
+    $PSScriptRoot = Split-Path -Parent -LiteralPath $MyInvocation.MyCommand.Path
+}
+if (-not $ConfigPath) {
+    $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
+}
+$ScriptVersion = '1.3.1'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1466,16 +1472,12 @@ function Restart-AfterScriptUpdate {
     )
 
     Write-Host "[UPDATE] Restarting with v$RemoteVersion..." -ForegroundColor Green
-    $argList = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', $ScriptPath,
-        '-Mode', $Mode,
-        '-Filter', $Filter,
-        '-ConfigPath', $ConfigPath,
-        '-SkipUpdate'
-    )
-    & powershell.exe @argList
+    $scriptDir = Split-Path -Parent -LiteralPath $ScriptPath
+    $invoke = @(
+        "Set-Location -LiteralPath '$scriptDir'",
+        "& '$ScriptPath' -Mode '$Mode' -Filter '$Filter' -ConfigPath '$ConfigPath' -SkipUpdate"
+    ) -join '; '
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $invoke
     exit 0
 }
 
