@@ -67,7 +67,8 @@ When `AutoUpdate` is `true`, the script checks GitHub before each sync run:
 
 1. Fetch `version.json` from the configured branch (`UpdateChannel`)
 2. Compare remote version with the local `$ScriptVersion`
-3. If newer: download script, verify SHA256, backup current file to `.bak`, replace, restart with `-SkipUpdate`
+3. If newer: download script, verify SHA256, backup current file to `.bak`, replace, and **stop**
+4. Print a message with the exact command to re-run (the current process still has the old version in memory)
 
 Use **`main`** for production and **`test`** for pre-release builds.
 

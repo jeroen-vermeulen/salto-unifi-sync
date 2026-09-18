@@ -31,7 +31,7 @@
     Path to JSON config. Default: unifi-sync-config.json next to this script.
 
 .PARAMETER SkipUpdate
-    Skip the GitHub auto-update check (used internally after a successful update restart).
+    Skip the GitHub auto-update check.
 
 .PARAMETER ForceUpdateCheck
     Check GitHub for updates even if UpdateCheckIntervalHours has not elapsed.
@@ -67,7 +67,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.3'
+$ScriptVersion = '1.3.4'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1474,27 +1474,31 @@ function Get-RemoteScriptSha256($Manifest) {
     return $null
 }
 
-function Restart-AfterScriptUpdate {
+function Exit-AfterScriptUpdate {
     param(
         [string]$ScriptPath,
         [string]$RemoteVersion,
+        [string]$LocalVersion,
         [string]$Mode,
         [string]$Filter,
-        [string]$ConfigPath
+        [string]$ConfigPath,
+        [string]$BackupPath
     )
 
-    Write-Host "[UPDATE] Restarting with v$RemoteVersion..." -ForegroundColor Green
     $scriptDir = Split-Path -Parent -LiteralPath $ScriptPath
-    $argList = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', $ScriptPath,
-        '-Mode', $Mode,
-        '-Filter', $Filter,
-        '-ConfigPath', $ConfigPath,
-        '-SkipUpdate'
-    )
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WorkingDirectory $scriptDir | Out-Null
+    $scriptName = Split-Path -Leaf $ScriptPath
+    $backupName = Split-Path -Leaf $BackupPath
+
+    Write-Host ''
+    Write-Host '[UPDATE] New version installed successfully.' -ForegroundColor Green
+    Write-Host "[UPDATE] Installed : v$RemoteVersion (file on disk)" -ForegroundColor Green
+    Write-Host "[UPDATE] This run : v$LocalVersion (still in memory — sync not started)" -ForegroundColor Yellow
+    Write-Host "[UPDATE] Backup   : $backupName" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '[UPDATE] Re-run the script to sync with the new version:' -ForegroundColor Cyan
+    Write-Host "  cd '$scriptDir'" -ForegroundColor White
+    Write-Host "  .\$scriptName -Mode $Mode -Filter '$Filter' -ConfigPath '$ConfigPath'" -ForegroundColor White
+    Write-Host ''
     exit 0
 }
 
@@ -1555,11 +1559,10 @@ function Invoke-ScriptSelfUpdate {
 
         Copy-Item -LiteralPath $scriptPath -Destination $bakPath -Force
         Move-Item -LiteralPath $newPath -Destination $scriptPath -Force
-        Write-Host "[UPDATE] Installed v$remoteVersion (backup: $(Split-Path -Leaf $bakPath))." -ForegroundColor Green
         Set-UpdateCheckTimestamp -Cfg $Cfg
-        Restart-AfterScriptUpdate -ScriptPath $scriptPath -RemoteVersion $remoteVersion `
-            -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath
-        return $true
+        Exit-AfterScriptUpdate -ScriptPath $scriptPath -RemoteVersion $remoteVersion `
+            -LocalVersion $ScriptVersion -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath `
+            -BackupPath $bakPath
     } catch {
         Write-Host "[UPDATE FAIL] $($_.Exception.Message)" -ForegroundColor Red
         Write-Host '[UPDATE] Continuing with current script version.' -ForegroundColor DarkYellow
