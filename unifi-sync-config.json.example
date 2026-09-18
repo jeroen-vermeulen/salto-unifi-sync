@@ -11,5 +11,12 @@
   "DeleteOrphanNfcTokens": true,
   "PageSize": 200,
   "LogEnabled": true,
-  "LogDir": "C:\\path\\to\\Sync-Salto-Unifi\\logs"
+  "LogDir": "C:\\path\\to\\Sync-Salto-Unifi\\logs",
+
+  "AutoUpdate": false,
+  "UpdateChannel": "main",
+  "UpdateRepoOwner": "jeroen-vermeulen",
+  "UpdateRepoName": "salto-unifi-sync",
+  "UpdateCheckIntervalHours": 24,
+  "UpdateGitHubTokenFile": "C:\\path\\to\\github.token"
 }

@@ -54,6 +54,42 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `PageSize` | no | UniFi API pagination (default: `200`) |
 | `LogEnabled` | no | Write per-run log files (default: `true`) |
 | `LogDir` | no | Log directory (default: `logs` next to script) |
+| `AutoUpdate` | no | Check GitHub for a newer script on start (default: `false`) |
+| `UpdateChannel` | no | Git branch to follow: `main` or `test` (default: `main`) |
+| `UpdateRepoOwner` | no | GitHub user/org (default: `jeroen-vermeulen`) |
+| `UpdateRepoName` | no | GitHub repo name (default: `salto-unifi-sync`) |
+| `UpdateCheckIntervalHours` | no | Minimum hours between update checks (default: `24`) |
+| `UpdateGitHubTokenFile` | no | PAT file for private repo downloads (optional) |
+
+## Auto-update
+
+When `AutoUpdate` is `true`, the script checks GitHub before each sync run:
+
+1. Fetch `version.json` from the configured branch (`UpdateChannel`)
+2. Compare remote version with the local `$ScriptVersion`
+3. If newer: download script, verify SHA256, backup current file to `.bak`, replace, restart with `-SkipUpdate`
+
+Use **`main`** for production and **`test`** for pre-release builds.
+
+```json
+{
+  "AutoUpdate": true,
+  "UpdateChannel": "test",
+  "UpdateRepoOwner": "jeroen-vermeulen",
+  "UpdateRepoName": "salto-unifi-sync"
+}
+```
+
+For a **private** repo, create a GitHub PAT (read access) and point `UpdateGitHubTokenFile` to a local one-line token file (same pattern as `ApiTokenFile`).
+
+Emergency bypass:
+
+```powershell
+.\Sync-Salto-Unifi.ps1 -Mode DiffSync -Filter ALL -SkipUpdate
+.\Sync-Salto-Unifi.ps1 -Mode DiffSync -Filter ALL -ForceUpdateCheck
+```
+
+If download or hash verification fails, the script logs `[UPDATE FAIL]` and continues with the current version.
 
 ## Modes
 
@@ -79,15 +115,14 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `main` (production) | `https://raw.githubusercontent.com/jeroen-vermeulen/salto-unifi-sync/main/version.json` |
 | `test` (pre-release) | `https://raw.githubusercontent.com/jeroen-vermeulen/salto-unifi-sync/test/version.json` |
 
-> Auto-update from GitHub (channel selection via config) will be added in a future release.
-
 ## What stays local
 
 Never commit these files — they contain site-specific or sensitive data:
 
 - `unifi-sync-config.json`
-- `unifi-api.token` / any `*.token`
+- `unifi-api.token` / `github.token` / any `*.token`
 - `logs/`
+- `Sync-Salto-Unifi.ps1.bak` (rollback backup after auto-update)
 
 ## Version
 

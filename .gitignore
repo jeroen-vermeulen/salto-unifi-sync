@@ -7,6 +7,9 @@ unifi-sync-config.json
 # Runtime output
 logs/
 *.log
+*.ps1.new
+*.ps1.bak
+last-update-check.txt
 
 # OS / editor
 .DS_Store
