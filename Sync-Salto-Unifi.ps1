@@ -5,7 +5,9 @@
 .DESCRIPTION
     Salto is the source of truth. Only basic local UniFi users managed by this
     script (matched via employee_number = Salto id_user) are created or updated.
-    Non-basic UniFi accounts are never modified.
+    Non-basic UniFi accounts (e.g. with email) are not updated in place. If they have
+    no NFC tag or the wrong tag, a new script-managed basic user is created instead.
+    If a non-basic account already has the correct Salto tag, it is left unchanged.
     Script-managed Basic users (employee_number + {id_user}_ first_name prefix) are
     deactivated in UniFi when no longer eligible in Salto (removed, inactive, or no tag).
 
@@ -67,7 +69,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.5'
+$ScriptVersion = '1.3.6'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -648,6 +650,27 @@ function Build-NfcTokenMap {
     return $map
 }
 
+function Get-UserPhysicalNfcTag {
+    param(
+        $UniFiUserDetail,
+        $NfcTokenMap = $null
+    )
+
+    $cards = Get-ObjProp $UniFiUserDetail 'nfc_cards'
+    if (-not $cards) { return $null }
+    foreach ($card in @($cards)) {
+        foreach ($field in @('nfc_id', 'uid', 'nfc_uid', 'serial_number')) {
+            $val = Get-ObjProp $card $field
+            if ($val) { return [string]$val.ToUpper() }
+        }
+        $token = Get-ObjProp $card 'token'
+        if ($token -and $NfcTokenMap -and $NfcTokenMap.ContainsKey([string]$token)) {
+            return [string]$NfcTokenMap[[string]$token].ToUpper()
+        }
+    }
+    return $null
+}
+
 function Get-UserNfcUid {
     param(
         $UniFiUserDetail,
@@ -915,21 +938,36 @@ function Build-SyncPlan {
             $identity = Invoke-UniFiJson -Method GET -Url "$api/users/$uniUserId/identity/assignments" -Token $Cfg.Token
             $basic = Test-BasicManagedUser -UserDetail $uniDetail -IdentityAssignments $identity
             if (-not $basic.Ok) {
-                $plan += [pscustomobject]@{
-                    id_user   = $desired.id_user
-                    Name      = (Format-SyncUserLabel $desired)
-                    SaltoTag  = $desired.tag_id
-                    UniFiTag  = (Get-UserNfcDisplayTag $uniDetail $desired $nfcTokenMap)
-                    Match     = $matchBy
-                    Status    = $desired.status_text
-                    Action    = 'SKIP_NON_BASIC'
-                    Details   = $basic.Reason
-                    Desired   = $desired
-                    UniFiUser = $uniUser
+                $legacyTag = Get-UserPhysicalNfcTag -UniFiUserDetail $uniDetail -NfcTokenMap $nfcTokenMap
+                $legacySummary = "$(Get-ObjProp $uniDetail 'first_name') $(Get-ObjProp $uniDetail 'last_name')"
+                if ($legacyTag -and $legacyTag -eq $desired.tag_id) {
+                    $plan += [pscustomobject]@{
+                        id_user   = $desired.id_user
+                        Name      = (Format-SyncUserLabel $desired)
+                        SaltoTag  = $desired.tag_id
+                        UniFiTag  = $legacyTag
+                        Match     = $matchBy
+                        Status    = $desired.status_text
+                        Action    = 'NONE'
+                        Details   = "Non-basic user; Salto tag already correct ($legacySummary)"
+                        Desired   = $desired
+                        UniFiUser = $uniUser
+                        GroupId   = $groupId
+                    }
+                    continue
                 }
-                continue
-            }
 
+                $currentTag = if ($legacyTag) { $legacyTag } else { '-' }
+                $tagNote = if ($legacyTag) { "wrong tag $legacyTag" } else { 'no tag' }
+                $uniSummary = "Non-basic ($($basic.Reason)); legacy $legacySummary ($tagNote) -> new script user"
+                $matchBy = 'legacy_non_basic'
+                $uniDetail = $null
+                $uniUser = $null
+            }
+        }
+
+        if ($uniDetail) {
+            $uniUserId = Get-ObjProp $uniDetail 'id'
             $uniSummary = "$(Get-ObjProp $uniDetail 'first_name') $(Get-ObjProp $uniDetail 'last_name')"
             $currentTag = Get-UserNfcDisplayTag $uniDetail $desired $nfcTokenMap
             $inGroup = Test-UserInGroup -GroupId $groupId -UserId $uniUserId -Cfg $Cfg
