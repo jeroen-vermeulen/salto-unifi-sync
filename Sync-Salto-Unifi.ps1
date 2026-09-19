@@ -64,12 +64,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $PSScriptRoot) {
-    $PSScriptRoot = Split-Path -Parent -LiteralPath $MyInvocation.MyCommand.Path
+    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.7'
+$ScriptVersion = '1.3.8'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1523,7 +1523,7 @@ function Exit-AfterScriptUpdate {
         [string]$BackupPath
     )
 
-    $scriptDir = Split-Path -Parent -LiteralPath $ScriptPath
+    $scriptDir = Split-Path -Parent $ScriptPath
     $scriptName = Split-Path -Leaf $ScriptPath
     $backupName = Split-Path -Leaf $BackupPath
 
