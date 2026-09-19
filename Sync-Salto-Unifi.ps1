@@ -69,7 +69,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.9'
+$ScriptVersion = '1.3.10'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -255,6 +255,15 @@ function Stop-RunLogging {
     }
 }
 
+function Get-UpdateChannelLabel {
+    param($Cfg)
+
+    if (-not $Cfg) { return 'n/a' }
+    $channel = [string](Get-ObjProp $Cfg 'UpdateChannel')
+    if ([string]::IsNullOrWhiteSpace($channel)) { return 'main' }
+    return $channel
+}
+
 function Write-RunBoundary {
     param(
         [ValidateSet('BEGIN', 'END')]
@@ -262,6 +271,7 @@ function Write-RunBoundary {
 
         [string]$Mode = '',
         [string]$Filter = '',
+        [string]$UpdateChannel = '',
         [string]$LogPath = '',
         [ValidateSet('SUCCESS', 'FAILED', '')]
         [string]$Status = '',
@@ -279,6 +289,9 @@ function Write-RunBoundary {
         Write-Host 'SALTO -> UNIFI SYNC RUN START' -ForegroundColor $color
         Write-Host "Timestamp : $timestamp"
         Write-Host "Version   : $ScriptVersion"
+        if ($UpdateChannel) {
+            Write-Host "Channel   : $UpdateChannel"
+        }
         Write-Host "Mode      : $Mode"
         Write-Host "Filter    : $Filter"
         Write-Host "User      : $env:USERDOMAIN\$env:USERNAME"
@@ -1640,7 +1653,8 @@ try {
     }
 
     $logPath = Start-RunLogging -Cfg $cfg -RunId $runId
-    Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -LogPath $logPath
+    $updateChannel = Get-UpdateChannelLabel -Cfg $cfg
+    Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel $updateChannel -LogPath $logPath
     $script:RunBoundaryStarted = $true
 
     $idFilter = Parse-IdFilter -FilterText $Filter
@@ -1700,7 +1714,7 @@ try {
 catch {
     if (-not $script:RunBoundaryStarted) {
         $logPath = Start-RunLogging -Cfg $null -RunId $runId
-        Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -LogPath $logPath
+        Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel 'n/a' -LogPath $logPath
         $script:RunBoundaryStarted = $true
     }
     $runStatus = 'FAILED'
