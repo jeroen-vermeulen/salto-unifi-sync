@@ -1,5 +1,5 @@
 {
-  "version": "1.3.6",
+  "version": "1.3.7",
   "released": "2026-09-19",
   "min_powershell": "5.1",
   "repository": {
@@ -8,7 +8,7 @@
   },
   "files": {
     "Sync-Salto-Unifi.ps1": {
-      "sha256": "a7f56b5f6d599b42959143d2322e4026d6d5a9937b83b8caa9d02271a130c1fc"
+      "sha256": "f575fd99224f482e56437de1abf9c26254ae2583cf15021d17a08b009fba4d4b"
     }
   }
 }
