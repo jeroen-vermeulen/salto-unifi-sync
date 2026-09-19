@@ -69,7 +69,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.6'
+$ScriptVersion = '1.3.7'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
