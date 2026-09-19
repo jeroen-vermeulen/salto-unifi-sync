@@ -64,12 +64,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $PSScriptRoot) {
-    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $PSScriptRoot = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 }
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.8'
+$ScriptVersion = '1.3.9'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1523,9 +1523,9 @@ function Exit-AfterScriptUpdate {
         [string]$BackupPath
     )
 
-    $scriptDir = Split-Path -Parent $ScriptPath
-    $scriptName = Split-Path -Leaf $ScriptPath
-    $backupName = Split-Path -Leaf $BackupPath
+    $scriptDir = [System.IO.Path]::GetDirectoryName($ScriptPath)
+    $scriptName = [System.IO.Path]::GetFileName($ScriptPath)
+    $backupName = [System.IO.Path]::GetFileName($BackupPath)
 
     Write-Host ''
     Write-Host '[UPDATE] New version installed successfully.' -ForegroundColor Green
@@ -1598,9 +1598,22 @@ function Invoke-ScriptSelfUpdate {
         Copy-Item -LiteralPath $scriptPath -Destination $bakPath -Force
         Move-Item -LiteralPath $newPath -Destination $scriptPath -Force
         Set-UpdateCheckTimestamp -Cfg $Cfg
-        Exit-AfterScriptUpdate -ScriptPath $scriptPath -RemoteVersion $remoteVersion `
-            -LocalVersion $ScriptVersion -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath `
-            -BackupPath $bakPath
+        try {
+            Exit-AfterScriptUpdate -ScriptPath $scriptPath -RemoteVersion $remoteVersion `
+                -LocalVersion $ScriptVersion -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath `
+                -BackupPath $bakPath
+        } catch {
+            Write-Host ''
+            Write-Host '[UPDATE] New version installed on disk; this process still runs the old script in memory.' -ForegroundColor Green
+            Write-Host "[UPDATE] Installed: v$remoteVersion | This run: v$ScriptVersion" -ForegroundColor Yellow
+            Write-Host '[UPDATE] Re-run the script to continue:' -ForegroundColor Cyan
+            $dir = [System.IO.Path]::GetDirectoryName($scriptPath)
+            $name = [System.IO.Path]::GetFileName($scriptPath)
+            Write-Host "  cd '$dir'" -ForegroundColor White
+            Write-Host "  .\$name -Mode $Mode -Filter '$Filter' -ConfigPath '$ConfigPath'" -ForegroundColor White
+            Write-Host ''
+            exit 0
+        }
     } catch {
         Write-Host "[UPDATE FAIL] $($_.Exception.Message)" -ForegroundColor Red
         Write-Host '[UPDATE] Continuing with current script version.' -ForegroundColor DarkYellow
