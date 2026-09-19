@@ -59,7 +59,6 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `UpdateRepoOwner` | no | GitHub user/org (default: `jeroen-vermeulen`) |
 | `UpdateRepoName` | no | GitHub repo name (default: `salto-unifi-sync`) |
 | `UpdateCheckIntervalHours` | no | Minimum hours between update checks (default: `24`) |
-| `UpdateGitHubTokenFile` | no | PAT file for private repo downloads (optional) |
 
 ## Auto-update
 
@@ -81,7 +80,7 @@ Use **`main`** for production and **`test`** for pre-release builds.
 }
 ```
 
-For a **private** repo, create a GitHub PAT (read access) and point `UpdateGitHubTokenFile` to a local one-line token file (same pattern as `ApiTokenFile`).
+The repository is public. Downloads use the GitHub API without a token.
 
 Emergency bypass:
 
@@ -121,7 +120,7 @@ If download or hash verification fails, the script logs `[UPDATE FAIL]` and cont
 Never commit these files — they contain site-specific or sensitive data:
 
 - `unifi-sync-config.json`
-- `unifi-api.token` / `github.token` / any `*.token`
+- `unifi-api.token` / any `*.token`
 - `logs/`
 - `Sync-Salto-Unifi.ps1.bak` (rollback backup after auto-update)
 
@@ -131,4 +130,4 @@ Current release: see [`version.json`](version.json) and `$ScriptVersion` inside 
 
 ## License
 
-Private / internal use — add a license if you publish publicly.
+Public repository. Add a license file if you want a formal license.

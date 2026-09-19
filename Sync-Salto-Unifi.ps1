@@ -69,7 +69,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.10'
+$ScriptVersion = '1.3.11'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -206,13 +206,6 @@ function Read-Config([string]$Path) {
     Set-ConfigDefault $cfg 'UpdateRepoOwner' 'jeroen-vermeulen'
     Set-ConfigDefault $cfg 'UpdateRepoName' 'salto-unifi-sync'
     Set-ConfigDefault $cfg 'UpdateCheckIntervalHours' 24
-    $ghTokenFile = Get-ObjProp $cfg 'UpdateGitHubTokenFile'
-    if ($ghTokenFile -and (Test-Path -LiteralPath $ghTokenFile)) {
-        $ghToken = (Get-Content -LiteralPath $ghTokenFile -Raw).Trim()
-        if ($ghToken) {
-            $cfg | Add-Member -NotePropertyName UpdateGitHubToken -NotePropertyValue $ghToken -Force
-        }
-    }
     return $cfg
 }
 
@@ -1451,8 +1444,7 @@ function Invoke-GitHubRepoDownload {
         [Parameter(Mandatory)][string]$Repo,
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Ref,
-        [Parameter(Mandatory)][string]$OutPath,
-        [string]$GitHubToken
+        [Parameter(Mandatory)][string]$OutPath
     )
 
     $url = "https://api.github.com/repos/$Owner/$Repo/contents/$Path" + "?ref=$Ref"
@@ -1463,16 +1455,6 @@ function Invoke-GitHubRepoDownload {
         '-o', $OutPath,
         $url
     )
-    if ($GitHubToken) {
-        $curlArgs = @(
-            '-skL', '-m', '120',
-            '-H', "Authorization: Bearer $GitHubToken",
-            '-H', 'Accept: application/vnd.github.raw+json',
-            '-H', 'User-Agent: salto-unifi-sync',
-            '-o', $OutPath,
-            $url
-        )
-    }
 
     $raw = & curl.exe @curlArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -1499,11 +1481,10 @@ function Get-RemoteVersionManifest {
     }
 
     $tempFile = Join-Path $env:TEMP ("salto-unifi-version-{0}.json" -f ([guid]::NewGuid().ToString('N')))
-    $ghToken = Get-ObjProp $Cfg 'UpdateGitHubToken'
 
     try {
         Invoke-GitHubRepoDownload -Owner $owner -Repo $repo -Path 'version.json' -Ref $Channel `
-            -OutPath $tempFile -GitHubToken $ghToken
+            -OutPath $tempFile
         $raw = Get-Content -LiteralPath $tempFile -Raw
         return ($raw | ConvertFrom-Json)
     } finally {
@@ -1596,11 +1577,10 @@ function Invoke-ScriptSelfUpdate {
         $scriptPath = Join-Path $PSScriptRoot 'Sync-Salto-Unifi.ps1'
         $newPath = "$scriptPath.new"
         $bakPath = "$scriptPath.bak"
-        $ghToken = Get-ObjProp $Cfg 'UpdateGitHubToken'
 
         Write-Host "[UPDATE] Downloading v$remoteVersion..." -ForegroundColor Cyan
         Invoke-GitHubRepoDownload -Owner $owner -Repo $repo -Path 'Sync-Salto-Unifi.ps1' -Ref $channel `
-            -OutPath $newPath -GitHubToken $ghToken
+            -OutPath $newPath
 
         $actualHash = Get-FileSha256Hex -Path $newPath
         if ($actualHash -ne $expectedHash) {

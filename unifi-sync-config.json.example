@@ -17,6 +17,5 @@
   "UpdateChannel": "main",
   "UpdateRepoOwner": "jeroen-vermeulen",
   "UpdateRepoName": "salto-unifi-sync",
-  "UpdateCheckIntervalHours": 24,
-  "UpdateGitHubTokenFile": "C:\\path\\to\\github.token"
+  "UpdateCheckIntervalHours": 24
 }
