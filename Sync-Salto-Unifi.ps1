@@ -38,6 +38,11 @@
 .PARAMETER ForceUpdateCheck
     Check GitHub for updates even if UpdateCheckIntervalHours has not elapsed.
 
+.PARAMETER Force
+    Apply the sync even if the deactivate/delete safety check (MaxDeactivationPercent,
+    default 10%) would otherwise abort the run. Only use after reviewing the plan
+    with -Mode ShowDiff.
+
 .EXAMPLE
     .\Sync-Salto-Unifi.ps1 -Mode ShowDiff -Filter ALL
 
@@ -58,7 +63,9 @@ param(
 
     [switch]$SkipUpdate,
 
-    [switch]$ForceUpdateCheck
+    [switch]$ForceUpdateCheck,
+
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -69,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.11'
+$ScriptVersion = '1.3.12'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -201,6 +208,7 @@ function Read-Config([string]$Path) {
     Set-ConfigDefault $cfg 'LogDir' (Join-Path $PSScriptRoot 'logs\salto-unifi-sync')
     Set-ConfigDefault $cfg 'DeactivateWhenIneligible' $true
     Set-ConfigDefault $cfg 'DeleteOrphanNfcTokens' $true
+    Set-ConfigDefault $cfg 'MaxDeactivationPercent' 10
     Set-ConfigDefault $cfg 'AutoUpdate' $false
     Set-ConfigDefault $cfg 'UpdateChannel' 'main'
     Set-ConfigDefault $cfg 'UpdateRepoOwner' 'jeroen-vermeulen'
@@ -422,6 +430,20 @@ function Get-IneligibleAction {
     }
 }
 
+function New-CurlAuthConfigFile {
+    param(
+        [Parameter(Mandatory)][string]$Token
+    )
+    # Passing the bearer token via -K (a curl "config" file) keeps it out of the
+    # process command line, where any other local process/user could otherwise
+    # read it (e.g. via Get-CimInstance Win32_Process).
+    $path = Join-Path $env:TEMP ("unifi-auth-{0}.curlcfg" -f [guid]::NewGuid().ToString('N'))
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $escaped = $Token.Replace('"', '\"')
+    [System.IO.File]::WriteAllText($path, "header = ""Authorization: Bearer $escaped""`n", $utf8)
+    return $path
+}
+
 function Invoke-UniFiJson {
     param(
         [Parameter(Mandatory)][string]$Method,
@@ -430,13 +452,14 @@ function Invoke-UniFiJson {
         [string]$Token
     )
     $respFile = Join-Path $env:TEMP ("unifi-resp-{0}.json" -f [guid]::NewGuid().ToString('N'))
+    $authCfg = New-CurlAuthConfigFile -Token $Token
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     try {
         $args = @(
             '-sk', '-m', '120',
+            '-K', $authCfg,
             '-X', $Method,
             $Url,
-            '-H', "Authorization: Bearer $Token",
             '-H', 'accept: application/json',
             '-o', $respFile
         )
@@ -462,6 +485,7 @@ function Invoke-UniFiJson {
         return $json
     } finally {
         Remove-Item -LiteralPath $respFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $authCfg -ErrorAction SilentlyContinue
     }
 }
 
@@ -1067,7 +1091,12 @@ function Ensure-NfcToken {
 
     $csvPath = Join-Path $env:TEMP "unifi-nfc-$SaltoUserId.csv"
     Write-JsonNoBom $csvPath "$TagId,$alias`n"
-    $importRaw = & curl.exe -sk -m 120 -X POST "$api/credentials/nfc_cards/import" -H "Authorization: Bearer $($Cfg.Token)" -F "file=@$csvPath" 2>&1
+    $authCfg = New-CurlAuthConfigFile -Token $Cfg.Token
+    try {
+        $importRaw = & curl.exe -sk -m 120 -K $authCfg -X POST "$api/credentials/nfc_cards/import" -F "file=@$csvPath" 2>&1
+    } finally {
+        Remove-Item -LiteralPath $authCfg -ErrorAction SilentlyContinue
+    }
     $importText = ($importRaw | Out-String).Trim()
     if (-not $importText) { throw "NFC import returned empty response for ${TagId}" }
     $import = $importText | ConvertFrom-Json
@@ -1668,6 +1697,26 @@ try {
     $plan | Sort-Object id_user | Format-Table id_user, Name, Status, SaltoTag, UniFiTag, Match, Action, Details -AutoSize
 
     $toApply = @($plan | Where-Object { $_.Action -notin @('NONE', 'SKIP_NON_BASIC') })
+
+    # Safety check: a Salto/SQL data problem (wrong filter, bad connection, typo in
+    # SaltoUserType, ...) can make every managed user look "ineligible" at once. If a
+    # large fraction of the previously-managed population would be deactivated or
+    # deleted in one run, abort rather than silently wiping access for everyone.
+    # Only applies to full-population runs (-Filter ALL); scoped test runs are exempt.
+    $ineligibleActions = @($plan | Where-Object { $_.Action -match 'DEACTIVATE_USER|DELETE_USER' })
+    if ($idFilter.Type -eq 'All' -and $ineligibleActions.Count -gt 0) {
+        $baseline = $saltoUsers.Count + $ineligibleActions.Count
+        $maxPct = [double](Get-ObjProp $cfg 'MaxDeactivationPercent')
+        if ($maxPct -le 0) { $maxPct = 10 }
+        $impactPct = if ($baseline -gt 0) { [math]::Round(100.0 * $ineligibleActions.Count / $baseline, 1) } else { 0 }
+        $impactColor = if ($impactPct -gt $maxPct) { 'Red' } else { 'DarkGray' }
+        Write-Host ''
+        Write-Host ("Deactivate/delete impact: {0} of {1} managed user(s) ({2}%, threshold {3}%)" -f $ineligibleActions.Count, $baseline, $impactPct, $maxPct) -ForegroundColor $impactColor
+        if ($impactPct -gt $maxPct -and $Mode -ne 'ShowDiff' -and -not $Force) {
+            throw "Safety check failed: $($ineligibleActions.Count) of $baseline managed user(s) ($impactPct%) would be deactivated or deleted, exceeding the $maxPct% MaxDeactivationPercent threshold. This usually points to a Salto/SQL data problem rather than a real change. Review with -Mode ShowDiff, and re-run with -Force only after confirming the plan is correct."
+        }
+    }
+
     if ($Mode -eq 'ShowDiff') {
         $runSummary = "ShowDiff complete. $($toApply.Count) user(s) would be changed."
         Write-Host ''
