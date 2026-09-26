@@ -9,6 +9,7 @@
   "RequireTag": true,
   "DeactivateWhenIneligible": true,
   "DeleteOrphanNfcTokens": true,
+  "MaxDeactivationPercent": 10,
   "PageSize": 200,
   "LogEnabled": true,
   "LogDir": "C:\\path\\to\\Sync-Salto-Unifi\\logs",
