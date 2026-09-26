@@ -51,6 +51,7 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `RequireTag` | no | Skip users without active NFC tag (default: `true`) |
 | `DeactivateWhenIneligible` | no | Cleanup script-managed users in UniFi (default: `true`) |
 | `DeleteOrphanNfcTokens` | no | Remove NFC tokens from inventory on user delete (default: `true`) |
+| `MaxDeactivationPercent` | no | Abort a full (`-Filter ALL`) `DiffSync`/`FullSync` run if more than this % of managed users would be deactivated/deleted in one go (default: `10`) |
 | `PageSize` | no | UniFi API pagination (default: `200`) |
 | `LogEnabled` | no | Write per-run log files (default: `true`) |
 | `LogDir` | no | Log directory (default: `logs` next to script) |
@@ -90,6 +91,27 @@ Emergency bypass:
 ```
 
 If download or hash verification fails, the script logs `[UPDATE FAIL]` and continues with the current version.
+
+## Safety check: mass deactivation/deletion
+
+A wrong config value, a broken SQL connection string, or a SQL query that
+unexpectedly returns zero rows can make every managed user look "ineligible"
+at once. To avoid silently deactivating or deleting everyone in one run, a
+full-population run (`-Filter ALL`) aborts *before* applying any change if
+more than `MaxDeactivationPercent` (default `10`%) of the previously-managed
+UniFi users would be deactivated or deleted.
+
+- The impact (`X of Y managed user(s) (Z%)`) is always printed, including in
+  `-Mode ShowDiff`, so you can review the plan first.
+- Scoped runs (a single id, a range, or a list) are exempt — they are
+  intentionally narrow (e.g. testing one user) and the percentage is not
+  meaningful there.
+- If you've reviewed the plan and the large change is genuinely correct
+  (e.g. a bulk offboarding), re-run with `-Force` to override the check.
+
+```powershell
+.\Sync-Salto-Unifi.ps1 -Mode DiffSync -Filter ALL -Force
+```
 
 ## Modes
 
