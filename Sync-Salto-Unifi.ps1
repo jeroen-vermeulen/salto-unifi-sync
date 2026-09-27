@@ -76,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.13'
+$ScriptVersion = '1.3.14'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -824,7 +824,11 @@ function Build-UniFiUserIndex {
         [array]$UniFiUsers
     )
 
-    $api = "$($Cfg.UnifiHost)/api/v1/developer"
+    # The bulk user list (Get-AllUniFiUsers) already returns every field this index
+    # needs - employee_number, first_name, last_name, status, username, email,
+    # user_email, nfc_cards - identical in content to the per-user detail endpoint
+    # (verified against the live API). Fetching /users/$id again per user here used
+    # to cost one curl.exe process + TLS handshake per UniFi user for no new data.
     $nfcTokenMap = Build-NfcTokenMap -Cfg $Cfg
     $index = @{
         ByEmployee   = @{}
@@ -837,24 +841,20 @@ function Build-UniFiUserIndex {
         $userId = Get-ObjProp $u 'id'
         if (-not $userId) { continue }
 
-        $detailResp = Invoke-UniFiJson -Method GET -Url "$api/users/$userId" -Token $Cfg.Token
-        $detail = Get-ObjProp $detailResp 'data'
-        if (-not $detail) { continue }
-
-        $empNo = Get-ObjProp $detail 'employee_number'
+        $empNo = Get-ObjProp $u 'employee_number'
         if ($empNo -match '^\d+$') {
-            $index.ByEmployee[[string]$empNo] = $detail
+            $index.ByEmployee[[string]$empNo] = $u
         }
 
-        $firstName = Get-ObjProp $detail 'first_name'
-        $lastName = Get-ObjProp $detail 'last_name'
+        $firstName = Get-ObjProp $u 'first_name'
+        $lastName = Get-ObjProp $u 'last_name'
         if ($firstName -and $lastName) {
-            $index.ByName["$firstName|$lastName"] = $detail
+            $index.ByName["$firstName|$lastName"] = $u
         }
 
-        $tag = Get-UserNfcUid $detail -NfcTokenMap $nfcTokenMap
+        $tag = Get-UserNfcUid $u -NfcTokenMap $nfcTokenMap
         if ($tag) {
-            $index.ByTag[$tag] = $detail
+            $index.ByTag[$tag] = $u
         }
     }
 
@@ -890,17 +890,29 @@ function Find-MatchedUniFiUser {
     return @{ User = $null; MatchBy = 'none' }
 }
 
-function Test-UserInGroup {
+function Get-UniFiGroupMemberIds {
     param(
         [string]$GroupId,
-        [string]$UserId,
         $Cfg
     )
     $api = "$($Cfg.UnifiHost)/api/v1/developer"
     $resp = Invoke-UniFiJson -Method GET -Url "$api/user_groups/$GroupId/users" -Token $Cfg.Token
     $data = Get-ObjProp $resp 'data'
-    if (-not $data) { return $false }
-    return @($data | Where-Object { (Get-ObjProp $_ 'id') -eq $UserId }).Count -gt 0
+    $set = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($member in @($data)) {
+        $id = Get-ObjProp $member 'id'
+        if ($id) { [void]$set.Add([string]$id) }
+    }
+    return $set
+}
+
+function Test-UserInGroup {
+    param(
+        [string]$UserId,
+        [System.Collections.Generic.HashSet[string]]$GroupMemberIds
+    )
+    if (-not $GroupMemberIds) { return $false }
+    return $GroupMemberIds.Contains($UserId)
 }
 
 function Add-DeactivationPlanItems {
@@ -1004,6 +1016,7 @@ function Build-SyncPlan {
     Write-Host 'Indexing UniFi users (name, employee_number, NFC tag)...'
     $uniIndex = Build-UniFiUserIndex -Cfg $Cfg -UniFiUsers $UniFiUsers
     $nfcTokenMap = $uniIndex.NfcTokenMap
+    $groupMemberIds = Get-UniFiGroupMemberIds -GroupId $groupId -Cfg $Cfg
 
     $plan = @()
     foreach ($salto in $SaltoUsers) {
@@ -1054,7 +1067,7 @@ function Build-SyncPlan {
             $uniUserId = Get-ObjProp $uniDetail 'id'
             $uniSummary = "$(Get-ObjProp $uniDetail 'first_name') $(Get-ObjProp $uniDetail 'last_name')"
             $currentTag = Get-UserNfcDisplayTag $uniDetail $desired $nfcTokenMap
-            $inGroup = Test-UserInGroup -GroupId $groupId -UserId $uniUserId -Cfg $Cfg
+            $inGroup = Test-UserInGroup -UserId $uniUserId -GroupMemberIds $groupMemberIds
 
             $nameDiff = Test-NameDiffers `
                 -UniFirst (Get-ObjProp $uniDetail 'first_name') `
