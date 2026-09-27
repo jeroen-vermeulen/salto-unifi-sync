@@ -10,7 +10,7 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 
 - Windows Server or PC with access to Salto SQL Server and UniFi Access API (LAN)
 - PowerShell 5.1+
-- `sqlcmd.exe` (SQL Server tools)
+- `sqlcmd.exe` - either the classic ODBC-based tool (bundled with SQL Server / "Command Line Utilities for SQL Server") or the newer cross-platform `sqlcmd` (e.g. `winget install Microsoft.Sqlcmd`). The script auto-detects which one is on `PATH` and adjusts its arguments accordingly (see below); if both are installed, the highest-versioned one is used.
 - `curl.exe` (included with Windows 10/11 and Server 2019+)
 
 ## Quick start
@@ -111,6 +111,19 @@ UniFi users would be deactivated or deleted.
 
 ```powershell
 .\Sync-Salto-Unifi.ps1 -Mode DiffSync -Filter ALL -Force
+```
+
+## sqlcmd variant detection
+
+Two incompatible tools are both called `sqlcmd.exe` in the wild:
+
+- **Classic** (ODBC-based, bundled with SQL Server / "Command Line Utilities for SQL Server"). Supports `-f i:<codepage>,o:<codepage>` for forcing UTF-8 I/O.
+- **Modern** cross-platform `sqlcmd` (e.g. installed via `winget install Microsoft.Sqlcmd`). Does not support `-f` and errors with `Sqlcmd: 'f': Unknown Option` if it's passed — it is UTF-8 by default so the flag isn't needed there.
+
+On startup the script runs `Get-Command sqlcmd -All` to find every `sqlcmd` on `PATH`, checks each one's help output for `-f <codepage>` to classify it, and only adds `-f i:65001,o:65001` when the resolved binary supports it. If more than one `sqlcmd` is found (e.g. both variants installed side by side), the **highest-versioned** one is selected. The chosen path and detected variant are printed at the start of the run:
+
+```
+Using sqlcmd: C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE [classic (ODBC-based)]
 ```
 
 ## Modes

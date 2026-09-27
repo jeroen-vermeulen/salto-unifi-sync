@@ -1,6 +1,6 @@
 {
-  "version": "1.3.12",
-  "released": "2026-09-26",
+  "version": "1.3.13",
+  "released": "2026-09-27",
   "min_powershell": "5.1",
   "repository": {
     "owner": "jeroen-vermeulen",
@@ -8,7 +8,7 @@
   },
   "files": {
     "Sync-Salto-Unifi.ps1": {
-      "sha256": "bb9685441e61705b6f83b84ae62b359327776563ac16e4a9fb2553e212f65a5a"
+      "sha256": "dae5d34d8db9ee17a0f4794707b230614921be8cc5f781c52c4415ee7341ffc6"
     }
   }
 }
