@@ -76,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.12'
+$ScriptVersion = '1.3.13'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -155,6 +155,54 @@ function Test-NameDiffers {
     return ($firstDiff -or $lastDiff)
 }
 
+$script:SqlCmdResolved = $false
+$script:SqlCmdPath = $null
+$script:SqlCmdSupportsCodePage = $false
+
+function Get-SqlCmdFileVersion([string]$Path) {
+    try {
+        $v = (Get-Item -LiteralPath $Path).VersionInfo.FileVersionRaw
+        if ($v) { return $v }
+    } catch { }
+    return [version]'0.0.0.0'
+}
+
+function Test-SqlCmdSupportsCodePage([string]$Path) {
+    # Classic ODBC-based sqlcmd (Command Line Utilities for SQL Server) supports
+    # -f i:<codepage>,o:<codepage>. The newer cross-platform "go-sqlcmd" (e.g. from
+    # `winget install Microsoft.Sqlcmd`) does not know this flag and errors with
+    # "Unknown Option" - it is UTF-8 safe by default so the flag is not needed there.
+    try {
+        $help = (& $Path '-?' 2>&1 | Out-String)
+    } catch {
+        return $false
+    }
+    return [bool]($help -match '-f\s*<codepage>')
+}
+
+function Resolve-SqlCmdPath {
+    if ($script:SqlCmdResolved) { return }
+
+    $candidates = @(Get-Command sqlcmd -All -CommandType Application -ErrorAction SilentlyContinue)
+    if ($candidates.Count -eq 0) {
+        throw "sqlcmd.exe not found on PATH. Install SQL Server command-line tools (classic 'Command Line Utilities for SQL Server' or the newer 'sqlcmd' via winget) and try again."
+    }
+
+    $chosen = $candidates |
+        Sort-Object { Get-SqlCmdFileVersion $_.Source } -Descending |
+        Select-Object -First 1
+
+    $script:SqlCmdPath = $chosen.Source
+    $script:SqlCmdSupportsCodePage = Test-SqlCmdSupportsCodePage -Path $script:SqlCmdPath
+    $script:SqlCmdResolved = $true
+
+    $variant = if ($script:SqlCmdSupportsCodePage) { 'classic (ODBC-based)' } else { 'modern (go-sqlcmd)' }
+    Write-Host "Using sqlcmd: $($script:SqlCmdPath) [$variant]" -ForegroundColor DarkGray
+    if ($candidates.Count -gt 1) {
+        Write-Host "  ($($candidates.Count) sqlcmd installations found on PATH; selected highest version)" -ForegroundColor DarkGray
+    }
+}
+
 function Invoke-SaltoSqlCmd {
     param(
         [string]$SqlServer,
@@ -162,13 +210,19 @@ function Invoke-SaltoSqlCmd {
         [string]$InputFile
     )
 
+    Resolve-SqlCmdPath
+
     $previousOutputEncoding = [Console]::OutputEncoding
     $previousPsOutputEncoding = $OutputEncoding
     try {
         $utf8 = [System.Text.UTF8Encoding]::new($false)
         [Console]::OutputEncoding = $utf8
         $OutputEncoding = $utf8
-        $raw = & sqlcmd.exe -S $SqlServer -E -d $Database -W -s '|' -i $InputFile -f i:65001,o:65001 2>&1
+        $sqlCmdArgs = @('-S', $SqlServer, '-E', '-d', $Database, '-W', '-s', '|', '-i', $InputFile)
+        if ($script:SqlCmdSupportsCodePage) {
+            $sqlCmdArgs += @('-f', 'i:65001,o:65001')
+        }
+        $raw = & $script:SqlCmdPath @sqlCmdArgs 2>&1
         if ($LASTEXITCODE -ne 0) {
             $msg = ($raw | Out-String).Trim()
             if ($msg) { throw "sqlcmd failed (exit $LASTEXITCODE): $msg" }
