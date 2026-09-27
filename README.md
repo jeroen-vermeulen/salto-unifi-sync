@@ -126,6 +126,25 @@ On startup the script runs `Get-Command sqlcmd -All` to find every `sqlcmd` on `
 Using sqlcmd: C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE [classic (ODBC-based)]
 ```
 
+## Performance
+
+Every run indexes the UniFi user group once against the UniFi Access API. Up to v1.3.13
+this involved two per-user redundancies:
+
+- `Build-UniFiUserIndex` fetched `GET /users/{id}` individually for every UniFi user,
+  even though the bulk `GET /users` listing (already fetched for pagination) returns the
+  exact same fields (`employee_number`, `first_name`, `last_name`, `status`, `nfc_cards`,
+  `username`, `email`, `user_email`).
+- `Test-UserInGroup` re-fetched the *entire* group's member list from scratch for every
+  Salto user matched to an existing UniFi account, instead of once for the whole run.
+
+Since v1.3.14 both are eliminated: the UniFi index is built directly from the bulk list,
+and group membership is fetched once and checked via an in-memory lookup. This removes
+one `curl.exe` process + TLS handshake per UniFi user, plus one per matched user for the
+group check — with no change in output (verified with a byte-for-byte diff of the plan
+table before/after on a live instance). Expect `-Mode ShowDiff -Filter ALL` to run
+noticeably faster, especially with a larger UniFi user base.
+
 ## Modes
 
 | Mode | Description |
