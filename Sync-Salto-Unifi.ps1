@@ -76,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.14'
+$ScriptVersion = '1.3.15'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -786,18 +786,17 @@ function Test-NfcInSync {
     $uid = Get-UserNfcUid $UniFiUserDetail -NfcTokenMap $NfcTokenMap
     if ($uid -eq $Desired.tag_id) { return $true }
 
-    $expectedAlias = "salto-$($Desired.id_user)"
-    $cards = Get-ObjProp $UniFiUserDetail 'nfc_cards'
-    if (-not $cards) { return $false }
-
-    foreach ($card in @($cards)) {
-        $token = Get-ObjProp $card 'token'
-        if (-not $token) { continue }
-        $alias = $null
-        if ($NfcTokenMap -and $NfcTokenMap.ContainsKey("token_alias:$token")) {
-            $alias = $NfcTokenMap["token_alias:$token"]
+    # Fallback for when the card's own UID couldn't be resolved directly: the
+    # "salto-{id_user}" alias is per-user, not per-tag, and stays attached to
+    # whichever token was last assigned - merely owning that alias slot does NOT
+    # prove the tag is current (e.g. after a physical card replacement). Only
+    # trust it if the UID currently behind that alias actually matches the
+    # desired tag.
+    if ($NfcTokenMap) {
+        $expectedAlias = "salto-$($Desired.id_user)"
+        if ($NfcTokenMap.ContainsKey($expectedAlias) -and $NfcTokenMap[$expectedAlias] -eq $Desired.tag_id) {
+            return $true
         }
-        if ($alias -eq $expectedAlias) { return $true }
     }
 
     return $false
@@ -1135,25 +1134,57 @@ function Get-FirstArrayItem($Value) {
     return $Value
 }
 
+function Remove-StaleSaltoAliasToken {
+    param(
+        [string]$Token,
+        [string]$UserId,
+        $Cfg
+    )
+    $api = "$($Cfg.UnifiHost)/api/v1/developer"
+    if ($UserId) {
+        Unassign-NfcTokensFromUser -UserId $UserId -Tokens @($Token) -Cfg $Cfg -UserLabel 'previous NFC tag'
+    }
+    if (-not (Test-NfcTokenExists -Token $Token -Cfg $Cfg)) { return }
+    try {
+        Invoke-UniFiJson -Method DELETE -Url "$api/credentials/nfc_cards/tokens/$Token" -Token $Cfg.Token | Out-Null
+        Write-Host "[NFC DELETE] Removed superseded token from inventory" -ForegroundColor Magenta
+    } catch {
+        Write-Host "[NFC DELETE FAIL] Could not delete superseded token: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 function Ensure-NfcToken {
     param(
         [string]$TagId,
         [int]$SaltoUserId,
-        $Cfg
+        $Cfg,
+        [string]$UserId = $null
     )
     $api = "$($Cfg.UnifiHost)/api/v1/developer"
     $alias = "salto-$SaltoUserId"
     $cards = Invoke-UniFiJson -Method GET -Url "$api/credentials/nfc_cards/tokens?page_size=500" -Token $Cfg.Token
     $cardData = Get-ObjProp $cards 'data'
+
+    # A token already imported for this exact tag wins outright, regardless of alias.
     $existing = $cardData | Where-Object {
-        $aliasVal = Get-ObjProp $_ 'alias'
         $nfcId = Get-ObjProp $_ 'nfc_id'
         $note = Get-ObjProp $_ 'note'
-        ($aliasVal -eq $alias) -or ($nfcId -and ([string]$nfcId).ToUpper() -eq $TagId) -or ($note -and ([string]$note).ToUpper() -eq $TagId)
+        ($nfcId -and ([string]$nfcId).ToUpper() -eq $TagId) -or ($note -and ([string]$note).ToUpper() -eq $TagId)
     } | Select-Object -First 1
     if ($existing) {
         $token = Get-ObjProp $existing 'token'
         if ($token) { return $token }
+    }
+
+    # No token for this tag yet. If this user's alias is still attached to an older
+    # (superseded) token - e.g. after a physical card replacement - clean that up
+    # first so "salto-{id_user}" always resolves to exactly one, current token.
+    $stale = $cardData | Where-Object { (Get-ObjProp $_ 'alias') -eq $alias } | Select-Object -First 1
+    if ($stale) {
+        $staleToken = Get-ObjProp $stale 'token'
+        if ($staleToken) {
+            Remove-StaleSaltoAliasToken -Token $staleToken -UserId $UserId -Cfg $Cfg
+        }
     }
 
     $csvPath = Join-Path $env:TEMP "unifi-nfc-$SaltoUserId.csv"
@@ -1331,7 +1362,7 @@ function Assign-NfcToUser {
         $Cfg
     )
     if (-not $UserId) { throw 'Assign-NfcToUser requires UserId' }
-    $token = Ensure-NfcToken -TagId $TagId -SaltoUserId $SaltoUserId -Cfg $Cfg
+    $token = Ensure-NfcToken -TagId $TagId -SaltoUserId $SaltoUserId -Cfg $Cfg -UserId $UserId
     if (-not $token) { throw "No NFC token resolved for tag ${TagId}" }
 
     $api = "$($Cfg.UnifiHost)/api/v1/developer"

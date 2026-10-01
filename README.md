@@ -126,6 +126,31 @@ On startup the script runs `Get-Command sqlcmd -All` to find every `sqlcmd` on `
 Using sqlcmd: C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE [classic (ODBC-based)]
 ```
 
+## NFC tag replacement detection
+
+Each script-managed UniFi user gets an NFC token aliased `salto-{id_user}` in the UniFi
+token inventory. Up to v1.3.14, two places treated *owning that alias* as proof the
+user's current card was correct:
+
+- `Test-NfcInSync` returned "in sync" if any of the user's attached cards had a token
+  aliased `salto-{id_user}` — without checking that token's actual UID matched the
+  Salto-desired tag.
+- `Ensure-NfcToken` matched an *existing* token on alias alone, so even after the above
+  was fixed it would still hand back the old card's token instead of importing one for
+  the new tag.
+
+Together these meant: once a user had a script-managed card, replacing their physical
+Salto pass was silently ignored forever — `DiffSync` never proposed `UPDATE_NFC` for
+them, since the alias (not the tag) was what the old pass check looked at, and the alias
+never changes.
+
+Since v1.3.15: `Test-NfcInSync` only trusts the alias if the UID currently behind it
+matches the desired tag, and `Ensure-NfcToken` matches *only* on tag value when looking
+for an existing token. When a user's alias is still attached to a superseded token (old
+tag no longer current), that token is unassigned from the user and deleted from the UniFi
+token inventory, then a fresh token is imported for the new tag under the same alias — so
+`salto-{id_user}` always resolves to exactly one, current token.
+
 ## Performance
 
 Every run indexes the UniFi user group once against the UniFi Access API. Up to v1.3.13
