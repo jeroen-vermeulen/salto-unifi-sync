@@ -43,7 +43,7 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 |-----|----------|-------------|
 | `UnifiHost` | yes | UniFi Access API base URL |
 | `ApiTokenFile` | yes | Path to bearer token file (local, not in git) |
-| `SqlServer` | yes | SQL Server instance |
+| `SqlServer` | yes | SQL Server to read the Salto database from: `localhost\SQLEXPRESS`, `host\instance`, `host,port`, or a LocalDB instance `(localdb)\<instance>` (Salto ProAccess Space's `service.ini` lists it as `DBServerName`) |
 | `Database` | yes | Salto database name (e.g. `SALTO_SPACE`) |
 | `UserGroupName` | yes | UniFi user group for access |
 | `SaltoUserType` | no | Filter on user type (default: `STAFF`) |
@@ -52,6 +52,7 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `DeactivateWhenIneligible` | no | Cleanup script-managed users in UniFi (default: `true`) |
 | `DeleteOrphanNfcTokens` | no | Remove NFC tokens from inventory on user delete (default: `true`) |
 | `MaxDeactivationPercent` | no | Abort a full (`-Filter ALL`) `DiffSync`/`FullSync` run if more than this % of managed users would be deactivated/deleted in one go (default: `10`) |
+| `SqlPreflight` | no | Check up front that `SqlServer` can answer (see "SQL Server preflight"); set `false` to skip (default: `true`) |
 | `PageSize` | no | UniFi API pagination (default: `200`) |
 | `LogEnabled` | no | Write per-run log files (default: `true`) |
 | `LogDir` | no | Log directory (default: `logs` next to script) |
@@ -125,6 +126,22 @@ On startup the script runs `Get-Command sqlcmd -All` to find every `sqlcmd` on `
 ```
 Using sqlcmd: C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE [classic (ODBC-based)]
 ```
+
+## SQL Server preflight
+
+A wrong `SqlServer` (typically a config copied from another machine) used to surface as a
+slow, cryptic `sqlcmd` timeout such as `Timed out waiting for pipe '\\.\pipe\SQLLocal\...'`.
+Since v1.3.16 the script checks first and stops within a second with an actionable message:
+
+| `SqlServer` form | What is checked |
+|------------------|-----------------|
+| `localhost\NAME`, `.\NAME`, `(local)`, `<this computer>` | The Windows service `MSSQL$NAME` (`MSSQLSERVER` for the default instance) exists and is running. The message lists the SQL services that do exist. |
+| `(localdb)\NAME` | `SqlLocalDB.exe i` lists `NAME` for the account running the script. LocalDB instances belong to a single Windows account, so a service-owned instance is invisible to another user: run the script as the owning account (normally the Salto service account). Shared instances (`(localdb)\.\name`) are not checked. |
+| `host,port` (or `localhost,port`) | The TCP port answers (3 s timeout). |
+| `host` or `host\NAME` (remote) | The host name resolves; for a default instance TCP 1433 must answer. Named-instance ports come from SQL Browser (UDP), so only the name is checked. |
+
+If the preflight ever misjudges a working setup, set `"SqlPreflight": false`. It does not
+test logins or permissions; those errors still come from `sqlcmd` itself.
 
 ## NFC tag replacement detection
 

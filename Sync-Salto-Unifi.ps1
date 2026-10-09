@@ -76,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.15'
+$ScriptVersion = '1.3.16'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -234,6 +234,132 @@ function Invoke-SaltoSqlCmd {
     }
 }
 
+function Test-TcpPortOpen {
+    param(
+        [string]$HostName,
+        [int]$Port,
+        [int]$TimeoutMs = 3000
+    )
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $client.EndConnect($iar)
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+function Get-SqlLocalDbPath {
+    $cmd = Get-Command SqlLocalDB.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $root) { continue }
+        $found = Get-ChildItem -Path (Join-Path $root 'Microsoft SQL Server\*\Tools\Binn\SqlLocalDB.exe') -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
+}
+
+function Test-SqlServerPreflight {
+    # Fails fast with an actionable message when the configured SqlServer cannot
+    # possibly answer, instead of letting sqlcmd sit in a long, cryptic timeout.
+    # Disable with "SqlPreflight": false in the config if it ever misjudges a setup.
+    param($Cfg)
+
+    if (-not (Get-ConfigBool $Cfg 'SqlPreflight' $true)) { return }
+
+    $server = ([string]$Cfg.SqlServer).Trim()
+    $who = "$env:USERDOMAIN\$env:USERNAME"
+    $skipHint = ' Set "SqlPreflight": false in the config to skip this check.'
+
+    # --- LocalDB: (localdb)\<instance> ---------------------------------------
+    if ($server -match '^\(localdb\)\\(?<name>.+)$') {
+        $name = $Matches['name'].Trim()
+        if ($name.StartsWith('.\')) {
+            Write-Host "[PREFLIGHT] LocalDB shared instance '$name' - instance check skipped." -ForegroundColor DarkGray
+            return
+        }
+        $exe = Get-SqlLocalDbPath
+        if (-not $exe) {
+            Write-Host '[PREFLIGHT] SqlLocalDB.exe not found - LocalDB check skipped.' -ForegroundColor DarkYellow
+            return
+        }
+        # "SqlLocalDB.exe i" lists instance names only (no localized labels to parse).
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $listed = @(& $exe i 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($listed -notcontains $name) {
+            $visible = if ($listed.Count -gt 0) { $listed -join ', ' } else { '(none)' }
+            throw ("LocalDB instance '$name' is not visible to $who (visible to this account: $visible). " +
+                'LocalDB instances belong to one Windows account: run this script as the account that owns the instance, ' +
+                'normally the account the Salto ProAccess Space service runs as. Find it with: ' +
+                'Get-CimInstance Win32_Service | Where-Object { $_.Name -like ''*salto*'' } | Select-Object Name, StartName.' + $skipHint)
+        }
+        Write-Host "[PREFLIGHT] LocalDB instance '$name' is visible to $who." -ForegroundColor DarkGray
+        return
+    }
+
+    # --- host[\instance][,port] ----------------------------------------------
+    if ($server -notmatch '^(?<host>[^\\,]+)(\\(?<inst>[^,]+))?(,(?<port>\d+))?$') {
+        Write-Host "[PREFLIGHT] Unrecognised SqlServer format '$server' - check skipped." -ForegroundColor DarkYellow
+        return
+    }
+    $hostName = ($Matches['host'] -replace '^(?i)tcp:', '').Trim()
+    $instance = if ($Matches['inst']) { $Matches['inst'].Trim() } else { $null }
+    $port = if ($Matches['port']) { [int]$Matches['port'] } else { $null }
+
+    $localNames = @('.', '(local)', 'localhost', '127.0.0.1', '::1', $env:COMPUTERNAME)
+    $isLocal = $localNames -contains $hostName
+
+    # Local instance without explicit port: the SQL Server Windows service must exist and run.
+    if ($isLocal -and -not $port) {
+        $svcName = if ($instance) { 'MSSQL$' + $instance } else { 'MSSQLSERVER' }
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            $present = @(Get-Service -Name 'MSSQL*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            $presentText = if ($present.Count -gt 0) { $present -join ', ' } else { 'none' }
+            throw ("SqlServer is '$server', but this machine has no SQL Server service '$svcName' (SQL services found: $presentText). " +
+                "If the Salto database runs in LocalDB, set SqlServer to '(localdb)\<instance>' (see DBServerName in Salto's service.ini). " +
+                'If it runs on another machine, set SqlServer to that host.' + $skipHint)
+        }
+        if ($svc.Status -ne 'Running') {
+            throw ("SQL Server service '$svcName' is $($svc.Status), not Running. Start it with: Start-Service '$svcName'." + $skipHint)
+        }
+        Write-Host "[PREFLIGHT] SQL Server service '$svcName' is running." -ForegroundColor DarkGray
+        return
+    }
+
+    # Remote host (or local with explicit port): resolve and test the TCP port.
+    $target = if ($isLocal) { '127.0.0.1' } else { $hostName }
+    if (-not $isLocal) {
+        try {
+            [void][System.Net.Dns]::GetHostAddresses($target)
+        } catch {
+            throw ("SQL Server host '$hostName' (from SqlServer '$server') cannot be resolved. Check the host name in the config." + $skipHint)
+        }
+    }
+    $testPort = if ($port) { $port } elseif (-not $instance) { 1433 } else { $null }
+    if ($testPort) {
+        if (-not (Test-TcpPortOpen -HostName $target -Port $testPort)) {
+            throw ("Cannot reach SQL Server at '$hostName' on TCP port $testPort (3 second timeout). " +
+                'Check that the host is up, that SQL Server accepts TCP/IP connections, and that no firewall blocks the port.' + $skipHint)
+        }
+        Write-Host "[PREFLIGHT] SQL Server host '$hostName' answers on TCP port $testPort." -ForegroundColor DarkGray
+    } else {
+        Write-Host "[PREFLIGHT] Host '$hostName' resolves; named-instance port is found via SQL Browser (UDP 1434) - port check skipped." -ForegroundColor DarkGray
+    }
+}
+
 function Read-Config([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "Config not found: $Path`nCopy unifi-sync-config.json.example to unifi-sync-config.json in the same folder as Sync-Salto-Unifi.ps1."
@@ -263,6 +389,7 @@ function Read-Config([string]$Path) {
     Set-ConfigDefault $cfg 'DeactivateWhenIneligible' $true
     Set-ConfigDefault $cfg 'DeleteOrphanNfcTokens' $true
     Set-ConfigDefault $cfg 'MaxDeactivationPercent' 10
+    Set-ConfigDefault $cfg 'SqlPreflight' $true
     Set-ConfigDefault $cfg 'AutoUpdate' $false
     Set-ConfigDefault $cfg 'UpdateChannel' 'main'
     Set-ConfigDefault $cfg 'UpdateRepoOwner' 'jeroen-vermeulen'
@@ -1765,6 +1892,8 @@ try {
     $script:RunBoundaryStarted = $true
 
     $idFilter = Parse-IdFilter -FilterText $Filter
+
+    Test-SqlServerPreflight -Cfg $cfg
 
     Write-Host 'Loading Salto users (sync scope)...'
     $saltoUsers = @(Get-SaltoUsers -Cfg $cfg -IdFilter $idFilter)
