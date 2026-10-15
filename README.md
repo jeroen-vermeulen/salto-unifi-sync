@@ -37,6 +37,24 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
    .\Sync-Salto-Unifi.ps1 -Mode DiffSync -Filter ALL
    ```
 
+### Execution policy (Windows 11)
+
+Windows 11 defaults to `Restricted` and refuses local scripts with
+`running scripts is disabled on this system`. Set it once per machine, from an elevated
+PowerShell, so the script works for everyone and self-updates keep working:
+
+```powershell
+Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force
+Get-ExecutionPolicy -List
+```
+
+`LocalMachine` should show `RemoteSigned`, and `MachinePolicy`/`UserPolicy` should be
+`Undefined` (a group policy would override the setting). A `Bypass` set with `-Scope Process`
+only applies to that window and wins over the machine setting there. A script downloaded by
+hand from the browser carries a download mark; remove it with `Unblock-File`. The self-update
+writes the file without that mark, so updates are not blocked. For a single run without
+changing anything: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-Salto-Unifi.ps1 ...`
+
 ## Configuration
 
 | Key | Required | Description |
