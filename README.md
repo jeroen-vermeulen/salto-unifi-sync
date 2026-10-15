@@ -282,6 +282,21 @@ list the users that need no change:
 .\Sync-Salto-Unifi.ps1 -Mode ShowDiff -Filter ALL -ShowAll
 ```
 
+### UniFi versus Salto: why the counts differ
+
+`UniFi users loaded` is *every* user in UniFi (administrators, visitors, users from other
+systems); `Salto users in sync scope` is only the eligible Salto users. They are not meant to
+be equal. With `-Mode ShowDiff -Filter ALL` (or `-ShowAll`) since v1.3.20 the script puts each
+UniFi user in exactly one bucket, so the difference is explained:
+
+- matched with a Salto user in scope;
+- script-managed but no longer in scope (these get deactivated or deleted, see the plan);
+- left alone by the script, listed by name with the reason: not script-managed (no numeric
+  `employee_number`, first name without the `<id>_` prefix, has an e-mail address or username),
+  already inactive, or a non-basic user.
+
+Salto users that do not exist in UniFi yet (to be created) are counted separately.
+
 ## Filter
 
 | Value | Meaning |

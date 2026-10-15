@@ -89,7 +89,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.19'
+$ScriptVersion = '1.3.20'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -906,6 +906,62 @@ function Write-SyncPlan {
     Write-Host ('  {0,-16} {1}' -f 'no change', $unchanged.Count) -ForegroundColor DarkGray
     if (-not $ShowAll -and $unchanged.Count -gt 0) {
         Write-Host '  (add -ShowAll to list the users without changes)' -ForegroundColor DarkGray
+    }
+}
+
+function Write-UniFiReconciliation {
+    # Explains why "UniFi users loaded" and "Salto users in sync scope" differ: every
+    # UniFi user is put in exactly one bucket. Only meaningful for -Filter ALL.
+    param(
+        [array]$Plan,
+        [array]$UniFiUsers,
+        [int]$SaltoCount
+    )
+
+    $matched = @{}
+    $retire = @{}
+    foreach ($item in $Plan) {
+        if ($null -eq $item.UniFiUser) { continue }
+        $uid = [string](Get-ObjProp $item.UniFiUser 'id')
+        if (-not $uid) { continue }
+        if ($item.Match -eq 'script_managed') { $retire[$uid] = $item } else { $matched[$uid] = $item }
+    }
+    $createCount = @($Plan | Where-Object { $_.Action -match 'CREATE_USER' }).Count
+
+    $untouched = @()
+    foreach ($u in $UniFiUsers) {
+        $uid = [string](Get-ObjProp $u 'id')
+        if ($matched.ContainsKey($uid) -or $retire.ContainsKey($uid)) { continue }
+        $managed = Test-ScriptManagedUniFiUser -UniFiUserDetail $u
+        if (-not $managed.Ok) {
+            $reason = 'not script-managed: ' + $managed.Reason
+        } elseif ((Get-ObjProp $u 'status') -ne 'ACTIVE') {
+            $reason = 'script-managed, already inactive in UniFi'
+        } else {
+            $reason = 'script-managed and active, but no action planned (non-basic user, or still eligible in Salto)'
+        }
+        $untouched += [pscustomobject]@{
+            Name   = ('{0} {1}' -f (Get-ObjProp $u 'first_name'), (Get-ObjProp $u 'last_name')).Trim()
+            Status = [string](Get-ObjProp $u 'status')
+            Reason = $reason
+        }
+    }
+
+    Write-Host ''
+    Write-Host '=== UniFi versus Salto: where do the numbers come from ===' -ForegroundColor White
+    Write-Host ('  UniFi users loaded                                  {0,4}' -f @($UniFiUsers).Count)
+    Write-Host ('    matched with a Salto user in scope                {0,4}' -f $matched.Count)
+    Write-Host ('    script-managed, no longer in Salto scope (change) {0,4}' -f $retire.Count)
+    Write-Host ('    left alone by the script                          {0,4}' -f $untouched.Count)
+    Write-Host ('  Salto users in scope                                {0,4}' -f $SaltoCount)
+    Write-Host ('    not yet in UniFi (will be created)                {0,4}' -f $createCount)
+    if ($untouched.Count -gt 0) {
+        Write-Host ''
+        Write-Host '  UniFi users left alone by the script:' -ForegroundColor White
+        $untouched | Sort-Object Reason, Name | Select-Object -First 60 | ForEach-Object {
+            Write-Host ('    {0,-34} {1,-9} {2}' -f $_.Name, $_.Status, $_.Reason)
+        }
+        if ($untouched.Count -gt 60) { Write-Host ('    ... and {0} more' -f ($untouched.Count - 60)) -ForegroundColor DarkGray }
     }
 }
 
@@ -2265,6 +2321,9 @@ try {
         -IdFilter $idFilter
 
     Write-SyncPlan -Plan $plan -ShowAll:$ShowAll
+    if ($idFilter.Type -eq 'All' -and ($Mode -eq 'ShowDiff' -or $ShowAll)) {
+        Write-UniFiReconciliation -Plan $plan -UniFiUsers $unifiUsers -SaltoCount $saltoUsers.Count
+    }
 
     $toApply = @($plan | Where-Object { $_.Action -notin @('NONE', 'SKIP_NON_BASIC') })
 
