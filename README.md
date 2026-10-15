@@ -257,6 +257,31 @@ noticeably faster, especially with a larger UniFi user base.
 | `DiffSync` | Apply only required changes (default) |
 | `FullSync` | Re-apply all mapped fields for filtered users |
 
+### Reading the plan
+
+Every run prints the plan before it does anything (and `ShowDiff` stops there). Since v1.3.19
+the plan lists **only the users that will change**, one block per user with the action(s) and
+what changes, old value -> new value:
+
+```
+     6  6_Bert Nieuw   [UPDATE_USER]
+          - name: '6_Bert Oud' -> '6_Bert Nieuw'
+     7  7_Cees Dijk   [UPDATE_NFC]
+          - NFC tag: 04AABBCCDDEEFF -> 04112233445566
+     8  8_Dora Berg   [CREATE_USER, ADD_GROUP, ASSIGN_NFC]
+          - create user '8_Dora Berg' (employee_number 8)
+          - add to user group '<group>'
+          - assign NFC tag 04778899AABBCC
+```
+
+Deactivations and deletions are shown in red with the reason, creations in green. A totals
+block follows (per action, plus the number of users without changes). Add `-ShowAll` to also
+list the users that need no change:
+
+```powershell
+.\Sync-Salto-Unifi.ps1 -Mode ShowDiff -Filter ALL -ShowAll
+```
+
 ## Filter
 
 | Value | Meaning |

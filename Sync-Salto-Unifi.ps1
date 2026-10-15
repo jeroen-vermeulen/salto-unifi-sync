@@ -43,6 +43,10 @@
     default 10%) would otherwise abort the run. Only use after reviewing the plan
     with -Mode ShowDiff.
 
+.PARAMETER ShowAll
+    Also list the users that need no change in the plan. By default the plan lists only
+    the users that would be changed, with what changes (old -> new) per user.
+
 .PARAMETER NoDelegate
     Run in the current account even when the config sets "SqlRunAs". Normally the
     script starts itself as the SqlRunAs account (needed for a private LocalDB
@@ -72,6 +76,8 @@ param(
 
     [switch]$Force,
 
+    [switch]$ShowAll,
+
     [switch]$NoDelegate
 )
 
@@ -83,7 +89,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.18'
+$ScriptVersion = '1.3.19'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -832,6 +838,77 @@ function Get-SaltoIneligibilityReason {
     return $null
 }
 
+function Get-IneligibleReasonText {
+    param([string]$Reason)
+    switch ($Reason) {
+        'NO_SALTO_TAG' { return 'user has no active tag in Salto' }
+        'SALTO_DELETED' { return 'user is deleted in Salto' }
+        'NOT_IN_SALTO' { return 'user no longer exists in Salto' }
+        'SALTO_NOT_IN_SCOPE' { return 'Salto user type is not in scope' }
+        'SALTO_INACTIVE' { return 'user is not active in Salto' }
+        default { return $Reason }
+    }
+}
+
+function Format-PlanValue($Value) {
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '(empty)' }
+    return [string]$Value
+}
+
+function Write-SyncPlan {
+    # Prints what a run would do: one block per changed user (action + old -> new per
+    # field), then totals. -ShowAll also lists the users that need no change.
+    param(
+        [array]$Plan,
+        [switch]$ShowAll
+    )
+
+    $sorted = @($Plan | Sort-Object id_user)
+    $changed = @($sorted | Where-Object { $_.Action -notin @('NONE', 'SKIP_NON_BASIC') })
+    $unchanged = @($sorted | Where-Object { $_.Action -in @('NONE', 'SKIP_NON_BASIC') })
+
+    Write-Host ''
+    Write-Host '=== Plan: users that will change ===' -ForegroundColor White
+    if ($changed.Count -eq 0) {
+        Write-Host '  (none - everything is in sync)' -ForegroundColor Green
+    }
+    foreach ($item in $changed) {
+        $color = 'Yellow'
+        if ($item.Action -match 'DEACTIVATE_USER|DELETE_USER') { $color = 'Red' }
+        elseif ($item.Action -match 'CREATE_USER') { $color = 'Green' }
+        Write-Host ('{0,6}  {1}' -f $item.id_user, $item.Name) -ForegroundColor $color -NoNewline
+        Write-Host ('   [{0}]' -f $item.Action) -ForegroundColor DarkGray
+        $lines = @($item.Changes)
+        if ($lines.Count -eq 0) { $lines = @([string]$item.Details) }
+        foreach ($line in $lines) {
+            Write-Host ('          - {0}' -f $line)
+        }
+    }
+
+    if ($ShowAll -and $unchanged.Count -gt 0) {
+        Write-Host ''
+        Write-Host '=== Plan: users without changes ===' -ForegroundColor White
+        $unchanged | Format-Table id_user, Name, Status, SaltoTag, UniFiTag, Match, Details -AutoSize
+    }
+
+    Write-Host ''
+    Write-Host '=== Plan: totals ===' -ForegroundColor White
+    $counts = @{}
+    foreach ($item in $changed) {
+        foreach ($a in ($item.Action -split ',\s*')) {
+            if (-not $counts.ContainsKey($a)) { $counts[$a] = 0 }
+            $counts[$a]++
+        }
+    }
+    foreach ($a in ($counts.Keys | Sort-Object)) {
+        Write-Host ('  {0,-16} {1}' -f $a, $counts[$a])
+    }
+    Write-Host ('  {0,-16} {1}' -f 'no change', $unchanged.Count) -ForegroundColor DarkGray
+    if (-not $ShowAll -and $unchanged.Count -gt 0) {
+        Write-Host '  (add -ShowAll to list the users without changes)' -ForegroundColor DarkGray
+    }
+}
+
 function Get-IneligibleAction {
     param([string]$Reason)
     switch ($Reason) {
@@ -1340,6 +1417,7 @@ function Add-DeactivationPlanItems {
             Status    = $desired.status_text
             Action    = (Get-IneligibleAction $reason)
             Details   = $reason
+            Changes   = @("$(if ((Get-IneligibleAction $reason) -eq 'DELETE_USER') { 'delete user from UniFi' } else { 'deactivate user in UniFi' }) ($(Get-IneligibleReasonText $reason))")
             Desired   = $desired
             UniFiUser = $detail
         }
@@ -1379,6 +1457,7 @@ function Build-SyncPlan {
     foreach ($salto in $SaltoUsers) {
         $desired = Get-DesiredState $salto
         $actions = @()
+        $changes = @()
         $match = Find-MatchedUniFiUser -Desired $desired -SaltoUser $salto -Index $uniIndex
         $uniDetail = $match.User
         $uniUser = $null
@@ -1404,6 +1483,7 @@ function Build-SyncPlan {
                         Status    = $desired.status_text
                         Action    = 'NONE'
                         Details   = "Non-basic user; Salto tag already correct ($legacySummary)"
+                        Changes   = @()
                         Desired   = $desired
                         UniFiUser = $uniUser
                         GroupId   = $groupId
@@ -1436,12 +1516,31 @@ function Build-SyncPlan {
             $groupDiff = -not $inGroup
             $statusDiff = ((Get-ObjProp $uniDetail 'status') -ne 'ACTIVE')
 
+            if ($nameDiff) {
+                $changes += ("name: '{0} {1}' -> '{2} {3}'" -f (Get-ObjProp $uniDetail 'first_name'), (Get-ObjProp $uniDetail 'last_name'), $desired.first_name, $desired.last_name)
+            }
+            if ($empDiff) {
+                $changes += ("employee_number: '{0}' -> '{1}'" -f (Format-PlanValue (Get-ObjProp $uniDetail 'employee_number')), $desired.employee_number)
+            }
+            if ($tagDiff) {
+                $changes += ('NFC tag: {0} -> {1}' -f (Format-PlanValue $currentTag), $desired.tag_id)
+            }
+            if ($groupDiff) {
+                $changes += ("add to user group '{0}'" -f $Cfg.UserGroupName)
+            }
+            if ($statusDiff) {
+                $changes += ('status: {0} -> ACTIVE' -f (Format-PlanValue (Get-ObjProp $uniDetail 'status')))
+            }
+
             if ($SyncMode -eq 'FullSync') {
                 if ($nameDiff -or $empDiff) { $actions += 'UPDATE_USER' }
                 if ($tagDiff) { $actions += 'UPDATE_NFC' }
                 if ($groupDiff) { $actions += 'ADD_GROUP' }
                 if ($statusDiff) { $actions += 'ACTIVATE_USER' }
-                if ($actions.Count -eq 0) { $actions += 'REFRESH' }
+                if ($actions.Count -eq 0) {
+                    $actions += 'REFRESH'
+                    $changes += 'no difference found; FullSync re-writes all mapped fields'
+                }
             } else {
                 if ($nameDiff -or $empDiff) { $actions += 'UPDATE_USER' }
                 if ($tagDiff) { $actions += 'UPDATE_NFC' }
@@ -1453,6 +1552,9 @@ function Build-SyncPlan {
             $actions += 'CREATE_USER'
             $actions += 'ADD_GROUP'
             $actions += 'ASSIGN_NFC'
+            $changes += ("create user '{0}' (employee_number {1})" -f (Format-SyncUserLabel $desired), $desired.employee_number)
+            $changes += ("add to user group '{0}'" -f $Cfg.UserGroupName)
+            $changes += ('assign NFC tag {0}' -f $desired.tag_id)
         }
 
         $plan += [pscustomobject]@{
@@ -1464,6 +1566,7 @@ function Build-SyncPlan {
             Status    = $desired.status_text
             Action    = ($actions -join ', ')
             Details   = "UniFi: $uniSummary"
+            Changes   = @($changes)
             Desired   = $desired
             UniFiUser = $uniUser
             GroupId   = $groupId
@@ -2123,6 +2226,7 @@ try {
     if ($runAs -and -not $NoDelegate -and -not (Test-RunningAsAccount -Account $runAs)) {
         $childParams = @{ ConfigPath = $ConfigPath; Mode = $Mode; Filter = $Filter; NoDelegate = $true; SkipUpdate = $true }
         if ($Force) { $childParams['Force'] = $true }
+        if ($ShowAll) { $childParams['ShowAll'] = $true }
         $delegatedExit = [int](@(Invoke-DelegatedRun -Account $runAs -ChildParams $childParams -ScriptFile $PSCommandPath) | Select-Object -Last 1)
         exit $delegatedExit
     }
@@ -2160,9 +2264,7 @@ try {
         -SyncMode $Mode `
         -IdFilter $idFilter
 
-    Write-Host ''
-    Write-Host '=== Plan ===' -ForegroundColor White
-    $plan | Sort-Object id_user | Format-Table id_user, Name, Status, SaltoTag, UniFiTag, Match, Action, Details -AutoSize
+    Write-SyncPlan -Plan $plan -ShowAll:$ShowAll
 
     $toApply = @($plan | Where-Object { $_.Action -notin @('NONE', 'SKIP_NON_BASIC') })
 
