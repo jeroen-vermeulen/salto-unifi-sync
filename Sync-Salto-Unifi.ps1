@@ -89,7 +89,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.20'
+$ScriptVersion = '1.3.21'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -959,7 +959,7 @@ function Write-UniFiReconciliation {
         Write-Host ''
         Write-Host '  UniFi users left alone by the script:' -ForegroundColor White
         $untouched | Sort-Object Reason, Name | Select-Object -First 60 | ForEach-Object {
-            Write-Host ('    {0,-34} {1,-9} {2}' -f $_.Name, $_.Status, $_.Reason)
+            Write-Host ('    {0,-34} {1,-12} {2}' -f $_.Name, $_.Status, $_.Reason)
         }
         if ($untouched.Count -gt 60) { Write-Host ('    ... and {0} more' -f ($untouched.Count - 60)) -ForegroundColor DarkGray }
     }
