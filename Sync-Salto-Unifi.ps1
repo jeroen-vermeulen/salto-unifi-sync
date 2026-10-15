@@ -76,7 +76,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.16'
+$ScriptVersion = '1.3.17'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -158,6 +158,7 @@ function Test-NameDiffers {
 $script:SqlCmdResolved = $false
 $script:SqlCmdPath = $null
 $script:SqlCmdSupportsCodePage = $false
+$script:LocalDbPipeCache = @{}
 
 function Get-SqlCmdFileVersion([string]$Path) {
     try {
@@ -218,7 +219,8 @@ function Invoke-SaltoSqlCmd {
         $utf8 = [System.Text.UTF8Encoding]::new($false)
         [Console]::OutputEncoding = $utf8
         $OutputEncoding = $utf8
-        $sqlCmdArgs = @('-S', $SqlServer, '-E', '-d', $Database, '-W', '-s', '|', '-i', $InputFile)
+        $serverArg = Resolve-LocalDbServer -SqlServer $SqlServer
+        $sqlCmdArgs = @('-S', $serverArg, '-E', '-d', $Database, '-W', '-s', '|', '-i', $InputFile)
         if ($script:SqlCmdSupportsCodePage) {
             $sqlCmdArgs += @('-f', 'i:65001,o:65001')
         }
@@ -266,6 +268,67 @@ function Get-SqlLocalDbPath {
     return $null
 }
 
+function Resolve-LocalDbServer {
+    # The modern go-sqlcmd cannot always turn "(localdb)\name" into a connection (seen
+    # with a LocalDB 11.0 instance: "no named pipe instance matching 'name' returned
+    # from host '(localdb)'"). LocalDB itself knows the instance's named pipe, and
+    # both sqlcmd variants can connect to "np:\\.\pipe\LOCALDB#xxxxxxxx\tsql\query"
+    # directly. The pipe name changes whenever the instance restarts, so it is looked
+    # up on every run (and cached for the rest of that run). Anything that is not a
+    # private LocalDB instance, or cannot be resolved, is returned unchanged.
+    param([string]$SqlServer)
+
+    if ($SqlServer -notmatch '^\(localdb\)\\(?<name>[^\\]+)$') { return $SqlServer }
+    $name = $Matches['name'].Trim()
+    if ($name.StartsWith('.')) { return $SqlServer }
+    if ($script:LocalDbPipeCache.ContainsKey($name)) { return $script:LocalDbPipeCache[$name] }
+
+    $resolved = $SqlServer
+    $exe = Get-SqlLocalDbPath
+    if ($exe) {
+        $pattern = 'np:\\\\\.\\pipe\\LOCALDB#[0-9A-Fa-f]+\\tsql\\query'
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            for ($attempt = 0; $attempt -lt 2; $attempt++) {
+                $info = @(& $exe info $name 2>&1 | ForEach-Object { "$_" })
+                $m = [regex]::Match(($info -join "`n"), $pattern)
+                if ($m.Success) { $resolved = $m.Value; break }
+                if ($attempt -eq 0) { $null = @(& $exe start $name 2>&1) }
+            }
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+    }
+    if ($resolved -ne $SqlServer) {
+        Write-Host "[SQL] LocalDB instance '$name' resolved to its named pipe." -ForegroundColor DarkGray
+    } else {
+        Write-Host "[SQL] Could not resolve a named pipe for LocalDB instance '$name'; using '$SqlServer' as configured." -ForegroundColor DarkYellow
+    }
+    $script:LocalDbPipeCache[$name] = $resolved
+    return $resolved
+}
+
+function Find-LocalDbInstanceProfiles {
+    # A private LocalDB instance keeps its files in its owner's profile, so the
+    # profile folders that contain Instances\<name> point at the owning account.
+    param([string]$Name)
+
+    $suffix = 'AppData\Local\Microsoft\Microsoft SQL Server Local DB\Instances\' + $Name
+    $profiles = @()
+    foreach ($root in @("$env:SystemDrive\Users", "$env:SystemRoot\ServiceProfiles")) {
+        if (Test-Path -LiteralPath $root) {
+            $profiles += @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        }
+    }
+    $profiles += "$env:SystemRoot\System32\config\systemprofile"
+    $found = @()
+    foreach ($p in $profiles) {
+        if (Test-Path -LiteralPath (Join-Path $p $suffix) -ErrorAction SilentlyContinue) { $found += $p }
+    }
+    return $found
+}
+
 function Test-SqlServerPreflight {
     # Fails fast with an actionable message when the configured SqlServer cannot
     # possibly answer, instead of letting sqlcmd sit in a long, cryptic timeout.
@@ -300,10 +363,16 @@ function Test-SqlServerPreflight {
         }
         if ($listed -notcontains $name) {
             $visible = if ($listed.Count -gt 0) { $listed -join ', ' } else { '(none)' }
+            $ownerProfiles = @(Find-LocalDbInstanceProfiles -Name $name)
+            $ownerText = if ($ownerProfiles.Count -gt 0) {
+                " Instance '$name' has data in: " + ($ownerProfiles -join '; ') +
+                ' (a folder under ServiceProfiles belongs to the service account of the same name, e.g. NT SERVICE\<service>; systemprofile is SYSTEM).'
+            } else { '' }
             throw ("LocalDB instance '$name' is not visible to $who (visible to this account: $visible). " +
                 'LocalDB instances belong to one Windows account: run this script as the account that owns the instance, ' +
-                'normally the account the Salto ProAccess Space service runs as. Find it with: ' +
-                'Get-CimInstance Win32_Service | Where-Object { $_.Name -like ''*salto*'' } | Select-Object Name, StartName.' + $skipHint)
+                'normally the account the Salto ProAccess Space service runs as (e.g. as a scheduled task).' + $ownerText +
+                ' Find the service account with: ' +
+                'Get-CimInstance Win32_Service | Where-Object { $_.PathName -like ''*salto*'' -or $_.DisplayName -like ''*salto*'' } | Select-Object Name, DisplayName, StartName, State.' + $skipHint)
         }
         Write-Host "[PREFLIGHT] LocalDB instance '$name' is visible to $who." -ForegroundColor DarkGray
         return
@@ -455,6 +524,7 @@ function Write-RunBoundary {
         [string]$Filter = '',
         [string]$UpdateChannel = '',
         [string]$LogPath = '',
+        [string]$ConfigFile = '',
         [ValidateSet('SUCCESS', 'FAILED', '')]
         [string]$Status = '',
         [string]$Summary = '',
@@ -478,6 +548,9 @@ function Write-RunBoundary {
         Write-Host "Filter    : $Filter"
         Write-Host "User      : $env:USERDOMAIN\$env:USERNAME"
         Write-Host "Computer  : $env:COMPUTERNAME"
+        if ($ConfigFile) {
+            Write-Host "Config    : $ConfigFile"
+        }
         if ($LogPath) {
             Write-Host "Log file  : $LogPath"
         } else {
@@ -1888,7 +1961,7 @@ try {
 
     $logPath = Start-RunLogging -Cfg $cfg -RunId $runId
     $updateChannel = Get-UpdateChannelLabel -Cfg $cfg
-    Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel $updateChannel -LogPath $logPath
+    Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel $updateChannel -LogPath $logPath -ConfigFile $ConfigPath
     $script:RunBoundaryStarted = $true
 
     $idFilter = Parse-IdFilter -FilterText $Filter
@@ -1970,7 +2043,7 @@ try {
 catch {
     if (-not $script:RunBoundaryStarted) {
         $logPath = Start-RunLogging -Cfg $null -RunId $runId
-        Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel 'n/a' -LogPath $logPath
+        Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel 'n/a' -LogPath $logPath -ConfigFile $ConfigPath
         $script:RunBoundaryStarted = $true
     }
     $runStatus = 'FAILED'

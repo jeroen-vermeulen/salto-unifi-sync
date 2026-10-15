@@ -143,6 +143,39 @@ Since v1.3.16 the script checks first and stops within a second with an actionab
 If the preflight ever misjudges a working setup, set `"SqlPreflight": false`. It does not
 test logins or permissions; those errors still come from `sqlcmd` itself.
 
+### LocalDB: running as the instance owner, and the named pipe
+
+A private LocalDB instance can only be reached by the Windows account that owns it. For
+Salto ProAccess Space that is the account its Windows service runs as (often a virtual
+account such as `NT SERVICE\<service name>`), not your own login. When the preflight says
+the instance is not visible, it also lists which profile folders hold the instance's data;
+the folder name identifies the owner. The service account is shown by:
+
+```powershell
+Get-CimInstance Win32_Service | Where-Object { $_.PathName -like '*salto*' -or $_.DisplayName -like '*salto*' } | Select-Object Name, DisplayName, StartName, State
+```
+
+Run the script as that account, for example as a scheduled task (a virtual service account
+needs no password):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\path\to\Sync-Salto-Unifi.ps1" -Mode DiffSync -Filter ALL'
+$principal = New-ScheduledTaskPrincipal -UserId 'NT SERVICE\<service name>' -LogonType ServiceAccount
+Register-ScheduledTask -TaskName 'Salto UniFi Sync' -Action $action -Principal $principal -Trigger (New-ScheduledTaskTrigger -Daily -At 03:00)
+```
+
+That account must be able to read the token file and the config, and write the log folder.
+It usually cannot write the script's own folder, so self-update then fails safely
+(`[UPDATE FAIL]`, the current version keeps running) and updates must be installed by hand.
+
+Since v1.3.17 the script also looks up the instance's named pipe with `SqlLocalDB.exe info <name>`
+and connects to `np:\\.\pipe\LOCALDB#...\tsql\query` instead of `(localdb)\<name>`. The modern
+`sqlcmd` could not always resolve `(localdb)\<name>` itself (for a LocalDB 11.0 instance it
+reported `no named pipe instance matching '<name>' returned from host '(localdb)'`). The pipe
+name changes whenever the instance restarts, so it is resolved on every run. If no pipe can be
+found, the configured `(localdb)\<name>` is used unchanged. The run header now also prints the
+config file that was loaded (`Config    : ...`).
+
 ## NFC tag replacement detection
 
 Each script-managed UniFi user gets an NFC token aliased `salto-{id_user}` in the UniFi
