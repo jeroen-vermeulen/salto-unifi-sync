@@ -53,6 +53,7 @@ Salto is the source of truth. The script creates/updates/deactivates/deletes **b
 | `DeleteOrphanNfcTokens` | no | Remove NFC tokens from inventory on user delete (default: `true`) |
 | `MaxDeactivationPercent` | no | Abort a full (`-Filter ALL`) `DiffSync`/`FullSync` run if more than this % of managed users would be deactivated/deleted in one go (default: `10`) |
 | `SqlPreflight` | no | Check up front that `SqlServer` can answer (see "SQL Server preflight"); set `false` to skip (default: `true`) |
+| `SqlRunAs` | no | Windows account that owns a private LocalDB instance; the script then re-runs itself as that account via a temporary scheduled task (elevated shell required, see "Running from a normal shell"). Empty = off (default) |
 | `PageSize` | no | UniFi API pagination (default: `200`) |
 | `LogEnabled` | no | Write per-run log files (default: `true`) |
 | `LogDir` | no | Log directory (default: `logs` next to script) |
@@ -175,6 +176,34 @@ reported `no named pipe instance matching '<name>' returned from host '(localdb)
 name changes whenever the instance restarts, so it is resolved on every run. If no pipe can be
 found, the configured `(localdb)\<name>` is used unchanged. The run header now also prints the
 config file that was loaded (`Config    : ...`).
+
+### Running from a normal shell: `SqlRunAs`
+
+Since v1.3.18 you do not have to set up a scheduled task yourself. Put the owning account in
+the config and start the script from an **elevated** PowerShell as usual:
+
+```json
+{
+  "SqlServer": "(localdb)\\<instance>",
+  "SqlRunAs": "NT SERVICE\\<service name>"
+}
+```
+
+When `SqlRunAs` is set and the script is not already running as that account, it:
+
+1. does the self-update check in your own (elevated) session, where it can write the script folder;
+2. creates a temporary scheduled task that runs the same script as `SqlRunAs`, with the same
+   `-Mode`, `-Filter`, `-Force` and config;
+3. streams the task's output live into your console, passes its exit code on, and removes the
+   task and its temporary folder (`%ProgramData%\Sync-Salto-Unifi\delegate-*`) afterwards.
+
+Notes:
+
+- The shell must be elevated (the task has to be registered); otherwise the script says so and stops.
+- The delegated account must be able to read the script, the config and the token file, and
+  write `LogDir`. The temporary folder is granted automatically.
+- `-NoDelegate` skips the delegation and runs in the current account (the inner run uses it too).
+- Leave `SqlRunAs` empty (the default) for normal SQL Server instances.
 
 ## NFC tag replacement detection
 

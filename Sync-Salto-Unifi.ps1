@@ -43,6 +43,11 @@
     default 10%) would otherwise abort the run. Only use after reviewing the plan
     with -Mode ShowDiff.
 
+.PARAMETER NoDelegate
+    Run in the current account even when the config sets "SqlRunAs". Normally the
+    script starts itself as the SqlRunAs account (needed for a private LocalDB
+    instance owned by another account) and uses this switch for that inner run.
+
 .EXAMPLE
     .\Sync-Salto-Unifi.ps1 -Mode ShowDiff -Filter ALL
 
@@ -65,7 +70,9 @@ param(
 
     [switch]$ForceUpdateCheck,
 
-    [switch]$Force
+    [switch]$Force,
+
+    [switch]$NoDelegate
 )
 
 Set-StrictMode -Version Latest
@@ -76,7 +83,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.17'
+$ScriptVersion = '1.3.18'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -329,6 +336,155 @@ function Find-LocalDbInstanceProfiles {
     return $found
 }
 
+function Test-IsElevated {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-RunningAsAccount {
+    param([string]$Account)
+    $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    return ($current -ieq $Account.Trim())
+}
+
+function ConvertTo-PsSingleQuoted([string]$Value) {
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Invoke-DelegatedRun {
+    # Runs this script again as $Account (config "SqlRunAs") through a temporary
+    # scheduled task and streams its output into this console. Needed when the Salto
+    # database is a private LocalDB instance: only the account that owns the instance
+    # (normally the Salto service account) can open it, and no interactive shell can
+    # be started as such a service account. Requires an elevated shell. Returns the
+    # exit code of the delegated run (0 = success, 1 = failed).
+    param(
+        [string]$Account,
+        [hashtable]$ChildParams,
+        [string]$ScriptFile
+    )
+
+    if (-not (Test-IsElevated)) {
+        throw ("SqlRunAs is set to '$Account', so this run must be started as that account, which needs an elevated shell " +
+            '(open PowerShell with "Run as administrator"). Alternatively run the script directly as that account ' +
+            '(for example from a scheduled task) or add -NoDelegate to run in the current account anyway.')
+    }
+
+    $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $dir = Join-Path $env:ProgramData "Sync-Salto-Unifi\delegate-$id"
+    $taskName = "SaltoSyncDelegate-$id"
+    $outFile = Join-Path $dir 'output.txt'
+    $launcher = Join-Path $dir 'run.ps1'
+    $marker = '__SALTO_DELEGATE_DONE__'
+    $exitCode = 1
+    $registered = $false
+    $reader = $null
+    try {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+        # The delegated account must be able to read the launcher and write the output file.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $grant = & icacls.exe $dir /grant ('{0}:(OI)(CI)M' -f $Account) /Q 2>&1
+            $grantExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($grantExit -ne 0) {
+            $grantText = @($grant | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ } } |
+                Where-Object { $_ -and $_.Trim() } | Select-Object -First 1)
+            throw "Could not grant '$Account' access to the temporary run folder (does that account exist?): $($grantText -join ' ')"
+        }
+
+        $pairs = foreach ($key in $ChildParams.Keys) {
+            $value = $ChildParams[$key]
+            if ($value -is [bool]) { '{0} = ${1}' -f $key, $value.ToString().ToLower() }
+            else { '{0} = {1}' -f $key, (ConvertTo-PsSingleQuoted ([string]$value)) }
+        }
+        $launcherText = @(
+            "`$ErrorActionPreference = 'Continue'",
+            ('$out = ' + (ConvertTo-PsSingleQuoted $outFile)),
+            ('$p = @{ ' + ($pairs -join '; ') + ' }'),
+            # One shared, auto-flushed writer: the parent reads the file while it is written.
+            '$fs = [System.IO.File]::Open($out, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)',
+            '$w = New-Object System.IO.StreamWriter($fs, (New-Object System.Text.UTF8Encoding($false)))',
+            '$w.AutoFlush = $true',
+            '$global:SaltoDelegateOk = $true',
+            '& {',
+            ('    try { & ' + (ConvertTo-PsSingleQuoted $ScriptFile) + ' @p }'),
+            '    catch { $global:SaltoDelegateOk = $false; Write-Output ("[RUNAS] Delegated run failed: " + $_.Exception.Message) }',
+            '} *>&1 | Out-String -Stream | ForEach-Object { $w.WriteLine([string]$_) }',
+            '$code = if ($global:SaltoDelegateOk) { 0 } else { 1 }',
+            ('$w.WriteLine("' + $marker + ' exit=" + $code)'),
+            '$w.Dispose()'
+        ) -join "`r`n"
+        Set-Content -LiteralPath $launcher -Value $launcherText -Encoding UTF8
+
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $launcher)
+        $principal = New-ScheduledTaskPrincipal -UserId $Account -LogonType ServiceAccount
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+        try {
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        } catch {
+            throw "Could not create a scheduled task that runs as '$Account' (does that account exist, and is it a service account?): $($_.Exception.Message)"
+        }
+        $registered = $true
+
+        Write-Host "[RUNAS] Running as '$Account' via temporary scheduled task '$taskName' (config SqlRunAs)..." -ForegroundColor DarkGray
+        Start-ScheduledTask -TaskName $taskName
+
+        $deadline = (Get-Date).AddMinutes(120)
+        $done = $false
+        $endedAt = $null
+        while (-not $done -and (Get-Date) -lt $deadline) {
+            if (-not $reader -and (Test-Path -LiteralPath $outFile)) {
+                $stream = [System.IO.File]::Open($outFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                $reader = New-Object System.IO.StreamReader($stream)
+            }
+            $gotLine = $false
+            if ($reader) {
+                while ($null -ne ($line = $reader.ReadLine())) {
+                    $gotLine = $true
+                    if ($line.StartsWith($marker)) {
+                        if ($line -match 'exit=(\d+)') { $exitCode = [int]$Matches[1] }
+                        $done = $true
+                        break
+                    }
+                    Write-Host $line
+                }
+            }
+            if ($done) { break }
+            if ($gotLine) {
+                $endedAt = $null
+            } else {
+                $state = [string](Get-ScheduledTask -TaskName $taskName).State
+                if ($state -ne 'Running' -and $state -ne 'Queued') {
+                    if (-not $endedAt) { $endedAt = Get-Date }
+                    elseif (((Get-Date) - $endedAt).TotalSeconds -gt 20) {
+                        $result = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
+                        throw ('The delegated run ended without reporting a result (task result 0x{0:X}). ' -f $result)
+                    }
+                } else {
+                    $endedAt = $null
+                }
+            }
+            Start-Sleep -Milliseconds 400
+        }
+        if (-not $done) { throw 'The delegated run did not finish within 120 minutes.' }
+        Write-Host "[RUNAS] Delegated run finished (exit code $exitCode)." -ForegroundColor DarkGray
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        if ($registered) {
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $exitCode
+}
+
 function Test-SqlServerPreflight {
     # Fails fast with an actionable message when the configured SqlServer cannot
     # possibly answer, instead of letting sqlcmd sit in a long, cryptic timeout.
@@ -370,7 +526,8 @@ function Test-SqlServerPreflight {
             } else { '' }
             throw ("LocalDB instance '$name' is not visible to $who (visible to this account: $visible). " +
                 'LocalDB instances belong to one Windows account: run this script as the account that owns the instance, ' +
-                'normally the account the Salto ProAccess Space service runs as (e.g. as a scheduled task).' + $ownerText +
+                'normally the account the Salto ProAccess Space service runs as. Either run the script as that account (e.g. as a scheduled task), ' +
+                'or set "SqlRunAs" in the config to that account so the script starts itself as it (needs an elevated shell).' + $ownerText +
                 ' Find the service account with: ' +
                 'Get-CimInstance Win32_Service | Where-Object { $_.PathName -like ''*salto*'' -or $_.DisplayName -like ''*salto*'' } | Select-Object Name, DisplayName, StartName, State.' + $skipHint)
         }
@@ -459,6 +616,7 @@ function Read-Config([string]$Path) {
     Set-ConfigDefault $cfg 'DeleteOrphanNfcTokens' $true
     Set-ConfigDefault $cfg 'MaxDeactivationPercent' 10
     Set-ConfigDefault $cfg 'SqlPreflight' $true
+    Set-ConfigDefault $cfg 'SqlRunAs' ''
     Set-ConfigDefault $cfg 'AutoUpdate' $false
     Set-ConfigDefault $cfg 'UpdateChannel' 'main'
     Set-ConfigDefault $cfg 'UpdateRepoOwner' 'jeroen-vermeulen'
@@ -1957,6 +2115,16 @@ try {
     if (-not $SkipUpdate) {
         Invoke-ScriptSelfUpdate -Cfg $cfg -ForceUpdateCheck:$ForceUpdateCheck `
             -Mode $Mode -Filter $Filter -ConfigPath $ConfigPath | Out-Null
+    }
+
+    # "SqlRunAs": run this script again as that account (a private LocalDB instance
+    # can only be opened by the account that owns it) and stream its output here.
+    $runAs = ([string](Get-ObjProp $cfg 'SqlRunAs')).Trim()
+    if ($runAs -and -not $NoDelegate -and -not (Test-RunningAsAccount -Account $runAs)) {
+        $childParams = @{ ConfigPath = $ConfigPath; Mode = $Mode; Filter = $Filter; NoDelegate = $true; SkipUpdate = $true }
+        if ($Force) { $childParams['Force'] = $true }
+        $delegatedExit = [int](@(Invoke-DelegatedRun -Account $runAs -ChildParams $childParams -ScriptFile $PSCommandPath) | Select-Object -Last 1)
+        exit $delegatedExit
     }
 
     $logPath = Start-RunLogging -Cfg $cfg -RunId $runId

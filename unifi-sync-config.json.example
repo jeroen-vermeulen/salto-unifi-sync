@@ -11,6 +11,7 @@
   "DeleteOrphanNfcTokens": true,
   "MaxDeactivationPercent": 10,
   "SqlPreflight": true,
+  "SqlRunAs": "",
   "PageSize": 200,
   "LogEnabled": true,
   "LogDir": "C:\\path\\to\\Sync-Salto-Unifi\\logs",
