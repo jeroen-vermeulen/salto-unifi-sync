@@ -248,6 +248,15 @@ tag no longer current), that token is unassigned from the user and deleted from 
 token inventory, then a fresh token is imported for the new tag under the same alias — so
 `salto-{id_user}` always resolves to exactly one, current token.
 
+## A person re-created in Salto
+
+If someone is created again in Salto under a new `id_user`, with the tag moved along and the
+old record left without a tag, the new record matches the existing UniFi user through the tag.
+Since v1.3.22 that UniFi user is **updated** (new `employee_number` and name) and kept, including
+the tag. Up to v1.3.21 the old record also planned a delete for the same UniFi user; the delete ran
+first and the update then failed with `CODE_USER_ACCOUNT_NOT_EXIST`. The cleanup pass now skips
+every UniFi user that an eligible Salto user already matched.
+
 ## Performance
 
 Every run indexes the UniFi user group once against the UniFi Access API. Up to v1.3.13
