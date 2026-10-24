@@ -257,6 +257,18 @@ the tag. Up to v1.3.21 the old record also planned a delete for the same UniFi u
 first and the update then failed with `CODE_USER_ACCOUNT_NOT_EXIST`. The cleanup pass now skips
 every UniFi user that an eligible Salto user already matched.
 
+## Logging
+
+Every run writes a log file `salto-unifi-sync_<yyyyMMdd_HHmmss>.log` to `LogDir`. When the script
+starts itself as another account through `SqlRunAs`, the **elevated session that you started**
+writes the log (a recording of everything you see in the console), so the service account needs no
+write access to the log folder. Before v1.3.23 that account wrote the log itself; where it had no
+write access the run still reported a `Log file` path, but no file existed. Since v1.3.23 the script
+probes the log folder first and, if it cannot write there, prints a `[LOG] WARNING` and says
+`Log file  : (NOT written ...)` in the run header and footer; the sync itself continues. When the
+script runs directly as the service account (for example a scheduled task), that account needs
+write access to `LogDir`; put it in a shared place such as `C:\ProgramData\Sync-Salto-Unifi\logs`.
+
 ## Performance
 
 Every run indexes the UniFi user group once against the UniFi Access API. Up to v1.3.13

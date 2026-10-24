@@ -47,6 +47,13 @@
     Also list the users that need no change in the plan. By default the plan lists only
     the users that would be changed, with what changes (old -> new) per user.
 
+.PARAMETER NoTranscript
+    Internal. Used by the delegated run started through "SqlRunAs": the starting
+    (elevated) session writes the log file, so this process does not start its own.
+
+.PARAMETER ParentLogPath
+    Internal. Log file path written by the starting session, shown in the run header.
+
 .PARAMETER NoDelegate
     Run in the current account even when the config sets "SqlRunAs". Normally the
     script starts itself as the SqlRunAs account (needed for a private LocalDB
@@ -78,7 +85,11 @@ param(
 
     [switch]$ShowAll,
 
-    [switch]$NoDelegate
+    [switch]$NoDelegate,
+
+    [switch]$NoTranscript,
+
+    [string]$ParentLogPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -89,10 +100,11 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.22'
+$ScriptVersion = '1.3.23'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
+$script:LogProblem = $null
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -641,6 +653,9 @@ function Start-RunLogging {
         [string]$RunId
     )
 
+    # Already logging (the delegating session starts it before the run): reuse it.
+    if ($script:TranscriptActive) { return $script:RunLogPath }
+
     $enabled = $true
     $logDir = Get-DefaultLogDir
     if ($Cfg) {
@@ -652,12 +667,24 @@ function Start-RunLogging {
     }
     if (-not $enabled) { return $null }
 
-    if (-not (Test-Path -LiteralPath $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $logPath = ''
+    try {
+        $logPath = Join-Path $logDir "salto-unifi-sync_$RunId.log"
+        if (-not (Test-Path -LiteralPath $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
+        }
+        # Start-Transcript does not always fail when this account may not write to the
+        # folder (the run then silently has no log), so probe the folder first.
+        $probe = Join-Path $logDir ('.write-test-' + [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($probe, 'x')
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        Start-Transcript -Path $logPath -Force -ErrorAction Stop | Out-Null
+    } catch {
+        $script:LogProblem = "Could not write a log file in '$logDir': $($_.Exception.Message)"
+        Write-Host "[LOG] WARNING: $script:LogProblem" -ForegroundColor Yellow
+        Write-Host '[LOG] The run continues without a log file. Set "LogDir" to a folder this account can write to.' -ForegroundColor Yellow
+        return $null
     }
-
-    $logPath = Join-Path $logDir "salto-unifi-sync_$RunId.log"
-    Start-Transcript -Path $logPath -Force | Out-Null
     $script:RunLogPath = $logPath
     $script:TranscriptActive = $true
     return $logPath
@@ -665,8 +692,11 @@ function Start-RunLogging {
 
 function Stop-RunLogging {
     if ($script:TranscriptActive) {
-        Stop-Transcript | Out-Null
+        try { Stop-Transcript | Out-Null } catch { }
         $script:TranscriptActive = $false
+        if ($script:RunLogPath -and -not (Test-Path -LiteralPath $script:RunLogPath)) {
+            Write-Host "[LOG] WARNING: the log file '$script:RunLogPath' does not exist after the run." -ForegroundColor Yellow
+        }
     }
 }
 
@@ -717,6 +747,8 @@ function Write-RunBoundary {
         }
         if ($LogPath) {
             Write-Host "Log file  : $LogPath"
+        } elseif ($script:LogProblem) {
+            Write-Host 'Log file  : (NOT written, see the [LOG] warning above)' -ForegroundColor Yellow
         } else {
             Write-Host 'Log file  : (logging disabled)'
         }
@@ -734,6 +766,8 @@ function Write-RunBoundary {
         }
         if ($script:RunLogPath) {
             Write-Host "Log file  : $script:RunLogPath"
+        } elseif ($script:LogProblem) {
+            Write-Host 'Log file  : (NOT written, see the [LOG] warning at the start)' -ForegroundColor Yellow
         }
     }
     Write-Host $separator -ForegroundColor $color
@@ -2294,14 +2328,24 @@ try {
     # can only be opened by the account that owns it) and stream its output here.
     $runAs = ([string](Get-ObjProp $cfg 'SqlRunAs')).Trim()
     if ($runAs -and -not $NoDelegate -and -not (Test-RunningAsAccount -Account $runAs)) {
-        $childParams = @{ ConfigPath = $ConfigPath; Mode = $Mode; Filter = $Filter; NoDelegate = $true; SkipUpdate = $true }
+        # This (elevated) session writes the log of the whole run: the account that owns
+        # the LocalDB instance usually cannot write to the log folder.
+        $parentLog = Start-RunLogging -Cfg $cfg -RunId $runId
+        $childParams = @{ ConfigPath = $ConfigPath; Mode = $Mode; Filter = $Filter; NoDelegate = $true; SkipUpdate = $true; NoTranscript = $true }
+        if ($parentLog) { $childParams['ParentLogPath'] = [string]$parentLog }
         if ($Force) { $childParams['Force'] = $true }
         if ($ShowAll) { $childParams['ShowAll'] = $true }
         $delegatedExit = [int](@(Invoke-DelegatedRun -Account $runAs -ChildParams $childParams -ScriptFile $PSCommandPath) | Select-Object -Last 1)
+        Stop-RunLogging
         exit $delegatedExit
     }
 
-    $logPath = Start-RunLogging -Cfg $cfg -RunId $runId
+    if ($NoTranscript) {
+        $logPath = $ParentLogPath
+        if ($logPath) { $script:RunLogPath = $logPath }
+    } else {
+        $logPath = Start-RunLogging -Cfg $cfg -RunId $runId
+    }
     $updateChannel = Get-UpdateChannelLabel -Cfg $cfg
     Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel $updateChannel -LogPath $logPath -ConfigFile $ConfigPath
     $script:RunBoundaryStarted = $true
@@ -2385,7 +2429,12 @@ try {
 }
 catch {
     if (-not $script:RunBoundaryStarted) {
-        $logPath = Start-RunLogging -Cfg $null -RunId $runId
+        if ($NoTranscript) {
+            $logPath = $ParentLogPath
+            if ($logPath) { $script:RunLogPath = $logPath }
+        } else {
+            $logPath = Start-RunLogging -Cfg $null -RunId $runId
+        }
         Write-RunBoundary -Phase BEGIN -Mode $Mode -Filter $Filter -UpdateChannel 'n/a' -LogPath $logPath -ConfigFile $ConfigPath
         $script:RunBoundaryStarted = $true
     }
