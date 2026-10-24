@@ -89,7 +89,7 @@ if (-not $PSScriptRoot) {
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $PSScriptRoot 'unifi-sync-config.json'
 }
-$ScriptVersion = '1.3.21'
+$ScriptVersion = '1.3.22'
 
 $script:RunLogPath = $null
 $script:TranscriptActive = $false
@@ -1414,7 +1414,8 @@ function Add-DeactivationPlanItems {
         [array]$SaltoLookup,
         $UniIndex,
         $NfcTokenMap,
-        [string]$Api
+        [string]$Api,
+        [hashtable]$ClaimedUniFiIds = @{}
     )
 
     if (-not (Get-ConfigBool $Cfg 'DeactivateWhenIneligible' $true)) {
@@ -1436,6 +1437,10 @@ function Add-DeactivationPlanItems {
         if ($eligibleIds.ContainsKey($empNo)) { continue }
 
         $detail = $UniIndex.ByEmployee[$empNo]
+        # A UniFi user that an eligible Salto user already matched (for example the same
+        # person re-created in Salto under a new id_user, with the tag moved along) is
+        # updated through that match; deleting it here would make the update fail later.
+        if ($ClaimedUniFiIds.ContainsKey([string](Get-ObjProp $detail 'id'))) { continue }
         if ((Get-ObjProp $detail 'status') -ne 'ACTIVE') { continue }
 
         $managed = Test-ScriptManagedUniFiUser -UniFiUserDetail $detail
@@ -1629,6 +1634,14 @@ function Build-SyncPlan {
         }
     }
 
+    $claimedUniFiIds = @{}
+    foreach ($planItem in $plan) {
+        if ($planItem.UniFiUser) {
+            $claimedId = [string](Get-ObjProp $planItem.UniFiUser 'id')
+            if ($claimedId) { $claimedUniFiIds[$claimedId] = $true }
+        }
+    }
+
     $plan = Add-DeactivationPlanItems `
         -Plan $plan `
         -Cfg $Cfg `
@@ -1637,7 +1650,8 @@ function Build-SyncPlan {
         -SaltoLookup $SaltoLookup `
         -UniIndex $uniIndex `
         -NfcTokenMap $nfcTokenMap `
-        -Api $api
+        -Api $api `
+        -ClaimedUniFiIds $claimedUniFiIds
 
     return ,@($plan)
 }
